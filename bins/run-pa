@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+run-pa — run the prime-agent dev container (dev-prime-agent) with host
+caches/state mounted.
+
+Standalone counterpart of bins/run-pi, for the prime-agent harness. Symlink
+into ~/.local/bin alongside run-pi.
+
+Examples:
+  run-pa                       # start prime-agent in $PWD
+  run-pa agents                # browse sessions  (=> prime-agent agents)
+  run-pa status                # inspect background services
+  run-pa attach <agent>        # reattach to a running session
+  run-pa --shell               # drop into bash inside the container
+                               #   (e.g. to resume / manage sessions)
+  run-pa --exec prime-agent --help
+  run-pa --engine docker       # use docker instead of podman
+  run-pa --dry-run             # print the command instead of running it
+
+Anything after "--" (or bare positionals) is passed to the `prime-agent`
+binary.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+AGENT = "prime-agent"           # binary run inside the container
+IMAGE = "dev-prime-agent"       # default image (override with --image)
+STATE_DIR = ".prime"            # host $HOME/.prime  ->  /root/.prime (agent state)
+VOLUME_PREFIX = "pa-target"     # named volume per project: pa-target<escaped pwd> -> /target
+
+# Env vars copied into the container when set on the host (`-e KEY` passes
+# the host value through; unset keys are skipped). Provider keys per
+# https://github.com/PrimeIntellect-ai/prime-agent providers docs.
+PASSTHROUGH_KEYS = [
+    "ZAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "XAI_API_KEY",
+    "PRIME_API_KEY",
+]
+
+
+def resolve_engine(engine: str) -> str:
+    """Pick a container engine: explicit choice, or auto (podman -> docker)."""
+    if engine and engine != "auto":
+        return engine
+    for candidate in ("podman", "docker"):
+        if shutil.which(candidate):
+            return candidate
+    sys.exit("error: no container engine found (tried podman, docker)")
+
+
+def ensure_mount_sources(home: Path, pwd: Path) -> None:
+    """Create host dirs that will be bind-mounted (podman refuses to create them)."""
+    dirs = [
+        pwd,
+        home / STATE_DIR,
+        home / ".cargo/registry",
+        home / ".cache/coursier",
+        home / ".ivy2",
+        home / ".cache/uv",
+        home / ".cache/pip",
+        home / ".cache/pypoetry",
+        home / ".m2/repository",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
+    """-v specs: bind mounts (host:container) + the per-project named volume."""
+    z = ":z" if selinux else ""
+    specs = [
+        f"{pwd}:{pwd}{z}",
+        f"{home / STATE_DIR}:/root/{STATE_DIR}{z}",
+        f"{home / '.cargo/registry'}:/usr/local/cargo/registry{z}",
+        f"{home / '.cache/coursier'}:/cache/coursier{z}",
+        f"{home / '.ivy2'}:/cache/ivy2{z}",
+        f"{home / '.cache/uv'}:/cache/uv{z}",
+        f"{home / '.cache/pip'}:/cache/pip{z}",
+        f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
+        f"{home / '.m2/repository'}:/cache/maven{z}",
+    ]
+    # Named (docker-managed) volume, one per host project dir, so builds
+    # survive container teardown and are shared across runs.
+    volume = VOLUME_PREFIX + str(pwd).replace("/", "_")
+    specs.append(f"{volume}:/target")
+    return specs
+
+
+def build_envs(extra: list[str]) -> list[str]:
+    """-e specs: fixed, then passthrough keys set on the host, then --env extras.
+
+    Kept in a dict keyed by variable name so a later --env entry replaces an
+    earlier passthrough of the same key (last one wins).
+    """
+    envs: dict[str, str] = {"CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target"}
+    for key in PASSTHROUGH_KEYS:
+        if os.environ.get(key) is not None:
+            envs[key] = key  # bare KEY: container copies the host value
+    for spec in extra:
+        envs[spec.split("=", 1)[0]] = spec
+    return list(envs.values())
+
+
+def build_container_command(args: argparse.Namespace) -> list[str]:
+    """What to run inside the container (--shell > --exec > agent + args)."""
+    if args.shell:
+        return ["bash"]
+    if args.exec_cmd:
+        return args.exec_cmd
+    if args.agent_args:
+        return [AGENT] + args.agent_args
+    return [AGENT]
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="run-pa",
+        description="Run the prime-agent dev container (dev-prime-agent) with host caches/state mounted.",
+        epilog="Non-flag arguments are passed to the `prime-agent` binary (use -- to start them). "
+               "Script options must come before `--`/`--exec`: everything after is container-side.",
+    )
+    p.add_argument("--shell", action="store_true",
+                   help="drop into an interactive bash shell instead of the agent")
+    p.add_argument("--exec", dest="exec_cmd", nargs=argparse.REMAINDER, metavar="CMD",
+                   help="run CMD... as-is instead of the agent; consumes every following arg "
+                        "(e.g. --exec prime-agent --help)")
+    p.add_argument("--engine", default="auto", metavar="ENGINE",
+                   help="container engine: podman, docker, or auto (default: auto)")
+    p.add_argument("--image", default=IMAGE, metavar="TAG",
+                   help=f"image to run (default: {IMAGE})")
+    p.add_argument("--no-selinux", dest="selinux", action="store_false", default=True,
+                   help="omit the :z suffix on bind mounts (non-SELinux hosts)")
+    p.add_argument("--env", action="append", default=[], metavar="KEY[=VALUE]",
+                   help="extra env var to pass into the container (repeatable); "
+                        "KEY alone passes the host value through")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the command and exit without running it")
+    p.add_argument("agent_args", nargs="*", metavar="ARG",
+                   help="extra arguments forwarded to the agent binary")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    home = Path.home()
+    pwd = Path.cwd()
+    engine = resolve_engine(args.engine)
+
+    ensure_mount_sources(home, pwd)
+
+    cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
+    for spec in build_mounts(home, pwd, args.selinux):
+        cmd += ["-v", spec]
+    cmd += ["-w", str(pwd)]
+    for env in build_envs(args.env):
+        cmd += ["-e", env]
+    cmd.append(args.image)
+    cmd += build_container_command(args)
+
+    if args.dry_run:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return 0
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1
 #
-# Dev image: Rust + Java + Python + Go + protobuf/buf + sbt + zig, with the `pi`
-# coding agent, hardwood-cli, openspec and open-spdd CLIs on top.
-# Works with both `docker build` and `podman build`.
+# Shared "heavy" base for all agentic dev containers in this repo.
+# Everything here is harness-agnostic: system packages, compilers, runtimes,
+# package managers, and generic CLIs. The per-harness layers (pi/,
+# prime-agent/) build on top of this and only add their own agent + CLIs.
 #
-#   podman build -t dev-pi .
+#   podman build -f shared/Dockerfile -t dev-shared .
 #
-# Base is Ubuntu 24.04 (noble). If you want to share a compiled cache with your host
-# (see the target/ discussion), match this to your host distro/glibc instead.
+# Base is Ubuntu 24.04 (noble). If you want to share a compiled cache with your
+# host (see the target/ discussion), match this to your host distro/glibc
+# instead.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -57,11 +59,12 @@ RUN --mount=type=cache,target=/var/cache/apt \
         #     native code that links against the GNU multiprecision libs.
         libgmp-dev \
         libmpfr-dev \
-        # --- search tools the `pi` agent shells out to (find/grep). Ship them
-        #     system-wide so pi reuses them instead of downloading fd/rg on
+        # --- search tools agents shell out to (find/grep). Ship them
+        #     system-wide so agents reuse them instead of downloading fd/rg on
         #     every run. `fd-find` installs the binary as `fdfind`, so also
-        #     provide the conventional `fd` symlink (pi checks both names).
-        #     No version requirement: pi only probes `cmd --version` for PATH.
+        #     provide the conventional `fd` symlink (pi and prime-agent both
+        #     check `cmd --version` on PATH and accept either name).
+        #     No version requirement: agents only probe `cmd --version`.
         # ---
         ripgrep \
         fd-find \
@@ -147,7 +150,8 @@ ENV MAVEN_HOME=/opt/maven
 COPY .m2/settings.xml /opt/maven/conf/settings.xml
 
 # ---------------------------------------------------------------------------
-# 4. Node.js (for the `pi` agent) + buf CLI.
+# 4. Node.js 22 (needed by every agent harness: pi and prime-agent both ship
+#    as npm packages) + buf CLI.
 #    buf is pulled as a static release binary (matches host arch via uname).
 # ---------------------------------------------------------------------------
 RUN --mount=type=cache,target=/var/cache/apt \
@@ -163,6 +167,7 @@ RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION
 # ---------------------------------------------------------------------------
 # 5. uv (installs system-wide) + poetry + pre-commit as uv tools + Python 3.10-3.13.
 #    UV_TOOL_BIN_DIR=/usr/local/bin puts `poetry`/`pre-commit` straight on PATH.
+#    Also used by the prime-agent layer to build its IPython kernel venv.
 # ---------------------------------------------------------------------------
 ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python \
@@ -234,16 +239,7 @@ RUN mkdir -p /cache/coursier /cache/uv /cache/pip /cache/poetry /cache/maven /ca
     && chmod -R a+rwX /cache
 
 # ---------------------------------------------------------------------------
-# 8. The pi coding agent (https://pi.dev) + the OpenSpec CLI
-#    (https://github.com/Fission-AI/OpenSpec/). Both ship as npm packages, so
-#    they share one global install (OpenSpec needs Node >= 20.19; we have
-#    Node 22 from step 4). Provides the `pi` and `openspec` binaries.
-# ---------------------------------------------------------------------------
-RUN npm install -g @earendil-works/pi-coding-agent @fission-ai/openspec@latest \
-    && npm cache clean --force
-
-# ---------------------------------------------------------------------------
-# 9. hardwood-cli (https://github.com/hardwood-hq/hardwood) — a native GraalVM
+# 8. hardwood-cli (https://github.com/hardwood-hq/hardwood) — a native GraalVM
 #    Parquet CLI, fetched from GitHub Releases (linux x86_64 only). The tarball
 #    keeps the binary in bin/ alongside its JNI compression libs (liblz4 /
 #    snappy / zstd) in lib/, which the binary resolves relative to itself, so
@@ -257,7 +253,7 @@ RUN curl -fsSL "https://github.com/hardwood-hq/hardwood/releases/download/v${HAR
 ENV PATH=/opt/hardwood-cli/bin:$PATH
 
 # ---------------------------------------------------------------------------
-# 10. Go toolchain + the open-spdd CLI (https://github.com/gszhangwei/open-spdd).
+# 9. Go toolchain + the open-spdd CLI (https://github.com/gszhangwei/open-spdd).
 #     open-spdd ships as a Go module and is installed via `go install`. Go is
 #     kept on the image (GOROOT under /opt/go, GOPATH under /opt/gopath) so the
 #     `go` command and any future `go install`s work for every runtime UID
@@ -278,5 +274,4 @@ RUN --mount=type=cache,target=/cache/go-build \
     && go install github.com/gszhangwei/open-spdd/cmd/openspdd@latest \
     && chmod -R a+rwX /cache /opt/gopath
 
-WORKDIR /work
-CMD ["pi"]
+# No WORKDIR/CMD here on purpose: each harness layer sets its own.
