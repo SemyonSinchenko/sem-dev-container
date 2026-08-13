@@ -18,7 +18,8 @@ FROM ${BASE_IMAGE}
 # they share one global install (OpenSpec needs Node >= 20.19; Node 22 comes
 # from the shared base). Provides the `pi` and `openspec` binaries.
 # ---------------------------------------------------------------------------
-RUN npm install -g @earendil-works/pi-coding-agent @fission-ai/openspec@latest \
+ARG PI_VERSION=0.84.1
+RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION} @fission-ai/openspec@latest \
     && npm cache clean --force
 
 WORKDIR /work

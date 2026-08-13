@@ -14,10 +14,10 @@ FROM ${BASE_IMAGE}
 
 # Latest stable release (mirrors the official install.sh flow:
 #   https://app.primeintellect.ai/prime-agent/install.sh
-# resolves <base>/stable -> "v0.7.1" and installs
-#   <base>/releases/v0.7.1/prime-agent-0.7.1.tgz  via `npm install -g`).
+# resolves <base>/stable -> "v0.7.2" and installs
+#   <base>/releases/v0.7.2/prime-agent-0.7.2.tgz  via `npm install -g`).
 # Bump this ARG to upgrade.
-ARG PRIME_AGENT_VERSION=0.7.1
+ARG PRIME_AGENT_VERSION=0.7.2
 ARG PRIME_AGENT_DOWNLOAD_BASE_URL=https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev
 
 # The kernel venv is created at build time by the package postinstall

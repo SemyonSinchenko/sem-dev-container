@@ -68,6 +68,13 @@ RUN --mount=type=cache,target=/var/cache/apt \
         # ---
         ripgrep \
         fd-find \
+        # --- editor + plotting: emacs-nox for elisp development (byte-compiler,
+        #     batch mode, ielm all work headlessly); gnuplot-nox so agents can
+        #     run/debug gnuplot scripts and render to PNG/SVG/dumb terminal.
+        #     -nox variants avoid pulling X11/Qt into the image.
+        # ---
+        emacs-nox \
+        gnuplot-nox \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -273,5 +280,16 @@ RUN --mount=type=cache,target=/cache/go-build \
     mkdir -p /opt/gopath \
     && go install github.com/gszhangwei/open-spdd/cmd/openspdd@latest \
     && chmod -R a+rwX /cache /opt/gopath
+
+# ---------------------------------------------------------------------------
+# 10. eask (https://emacs-eask.github.io/) — Emacs package manager / build
+#     tool for developing, testing and dependency-managing elisp. Installed
+#     via npm since Node 22 already lives in the shared base; the npm package
+#     (@emacs-eask/cli) drops a pure-JS `eask` binary straight on PATH. It
+#     shells out to `emacs` (provided by emacs-nox in step 1).
+# ---------------------------------------------------------------------------
+ARG EASK_VERSION=0.12.9
+RUN npm install -g @emacs-eask/cli@${EASK_VERSION} \
+    && npm cache clean --force
 
 # No WORKDIR/CMD here on purpose: each harness layer sets its own.
