@@ -8,13 +8,14 @@ base image carries all compilers, runtimes, and tools; each agent harness
 ┌────────────────────────────┐   ┌──────────────────────────────┐
 │ pi (thin)                  │   │ prime-agent (thin)           │
 │  • pi coding agent         │   │  • prime-agent CLI           │
-│  • openspec CLI            │   │  • IPython kernel venv       │
+│  • openspec CLI (shared)   │   │  • IPython kernel venv       │
 ├────────────────────────────┴───┴──────────────────────────────┤
 │ shared (heavy, ~everything)                                    │
 │  Ubuntu 24.04 base                                             │
 │  • build-essential, cmake, protoc, gdb (built from source)     │
 │  • Java 8/11/17/21 (+use-java), sbt, Maven (cache → /cache)    │
-│  • Node 22, buf, uv + Python 3.10–3.13, poetry, pre-commit     │
+│  • Node 22, buf, uv + Python 3.10–3.14, poetry, pre-commit,   │
+│    openspec CLI                                               │
 │  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy │
 │  • Go + open-spdd, hardwood-cli (Parquet)                      │
 │  • fd/rg preinstalled so agents reuse them                     │
@@ -51,8 +52,8 @@ podman run --rm -it -v "$PWD:/work" -w /work dev-prime-agent
 
 | Path | Role |
 |------|------|
-| `shared/Dockerfile`    | heavy base: compilers, runtimes, generic tools, caches |
-| `pi/Dockerfile`        | `FROM dev-shared` + pi coding agent + openspec |
+| `shared/Dockerfile`    | heavy base: compilers, runtimes, generic tools, caches, openspec CLI |
+| `pi/Dockerfile`        | `FROM dev-shared` + pi coding agent |
 | `prime-agent/Dockerfile` | `FROM dev-shared` + prime-agent + its IPython kernel venv |
 | `bins/run-pi`          | run the `dev-pi` container with host caches/state mounted |
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |

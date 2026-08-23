@@ -134,7 +134,7 @@ ENV PATH=$JAVA_HOME/bin:$PATH
 # ---------------------------------------------------------------------------
 # 3. sbt (JVM tarball, arch-independent).
 # ---------------------------------------------------------------------------
-ARG SBT_VERSION=1.11.7
+ARG SBT_VERSION=1.13.0
 RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
         | tar xz -C /opt \
     && ln -sf /opt/sbt/bin/sbt /usr/local/bin/sbt
@@ -144,8 +144,8 @@ RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt
 #     MAVEN_HOME points to the *install* (correct usage); the local repo cache
 #     is redirected to /cache/maven via the global settings.xml (see COPY below).
 # ---------------------------------------------------------------------------
-ARG MAVEN_VERSION=3.9.9
-RUN curl -fsSL "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
+ARG MAVEN_VERSION=3.9.16
+RUN curl -fsSL "https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" \
         | tar xz -C /opt \
     && ln -sfn /opt/apache-maven-${MAVEN_VERSION} /opt/maven \
     && ln -sf /opt/maven/bin/mvn /usr/local/bin/mvn
@@ -166,13 +166,13 @@ RUN --mount=type=cache,target=/var/cache/apt \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG BUF_VERSION=1.71.0
+ARG BUF_VERSION=1.72.0
 RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-$(uname -s)-$(uname -m)" \
         -o /usr/local/bin/buf \
     && chmod +x /usr/local/bin/buf
 
 # ---------------------------------------------------------------------------
-# 5. uv (installs system-wide) + poetry + pre-commit as uv tools + Python 3.10-3.13.
+# 5. uv (installs system-wide) + poetry + pre-commit as uv tools + Python 3.10-3.14.
 #    UV_TOOL_BIN_DIR=/usr/local/bin puts `poetry`/`pre-commit` straight on PATH.
 #    Also used by the prime-agent layer to build its IPython kernel venv.
 # ---------------------------------------------------------------------------
@@ -182,14 +182,15 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     INSTALLER_NO_MODIFY_PATH=1
 
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ARG UV_VERSION=0.12.5
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
-ARG PYTHON_DEFAULT=3.13
-# Interpreters 3.10-3.13, exposed on PATH as python3.10 ... python3.13.
+ARG PYTHON_DEFAULT=3.14
+# Interpreters 3.10-3.14, exposed on PATH as python3.10 ... python3.14.
 # A generic `python3`/`python` -> PYTHON_DEFAULT is provided so build scripts,
 # pre-commit hooks, etc. that assume `python3` exists actually find one.
-RUN uv python install 3.10 3.11 3.12 3.13 \
-    && for v in 3.10 3.11 3.12 3.13; do \
+RUN uv python install 3.10 3.11 3.12 3.13 3.14 \
+    && for v in 3.10 3.11 3.12 3.13 3.14; do \
          ln -sf "$(uv python find $v)" /usr/local/bin/python$v; \
        done \
     && ln -sf /usr/local/bin/python${PYTHON_DEFAULT} /usr/local/bin/python3 \
@@ -209,16 +210,18 @@ RUN uv tool install ziglang \
 
 # ---------------------------------------------------------------------------
 # 7. Rust stable toolchain + cargo-zigbuild. Installed system-wide so any UID
-#    (e.g. via `podman run --userns=keep-id`) can use it.
+#    (e.g. via `podman run --userns=keep-id`) can use it. RUST_VERSION is
+#    pinned to the current stable release; bump the ARG to upgrade.
 # ---------------------------------------------------------------------------
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
+ARG RUST_VERSION=1.98.0
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --no-modify-path --default-toolchain stable --profile default \
+        | sh -s -- -y --no-modify-path --default-toolchain ${RUST_VERSION} --profile default \
     && rustup component add rust-analyzer clippy rustfmt \
     && cargo install cargo-zigbuild \
     # add a couple of common cross targets zigbuild is handy for (optional):
@@ -267,7 +270,7 @@ ENV PATH=/opt/hardwood-cli/bin:$PATH
 #     (dirs are world-writable, matching the cargo/uv pattern). The build and
 #     module caches are redirected to /cache for host bind-mount sharing.
 # ---------------------------------------------------------------------------
-ARG GO_VERSION=1.26.5
+ARG GO_VERSION=1.27.0
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar xz -C /opt
 ENV GOROOT=/opt/go \
     GOPATH=/opt/gopath \
@@ -282,14 +285,24 @@ RUN --mount=type=cache,target=/cache/go-build \
     && chmod -R a+rwX /cache /opt/gopath
 
 # ---------------------------------------------------------------------------
-# 10. eask (https://emacs-eask.github.io/) — Emacs package manager / build
-#     tool for developing, testing and dependency-managing elisp. Installed
-#     via npm since Node 22 already lives in the shared base; the npm package
-#     (@emacs-eask/cli) drops a pure-JS `eask` binary straight on PATH. It
-#     shells out to `emacs` (provided by emacs-nox in step 1).
+# 10. Global npm packages (Node 22 itself comes from step 4). Three installs:
+#     - npm itself, upgraded to the latest release line (npm 12; the npm
+#       bundled with Node 22 stays on 11.x otherwise). npm 12 needs Node >=
+#       22.22 — setup_22.x in step 4 provides Node 22.23.x, so this is fine.
+#     - eask (https://emacs-eask.github.io/) — Emacs package manager / build
+#       tool for developing, testing and dependency-managing elisp. The npm
+#       package (@emacs-eask/cli) drops a pure-JS `eask` binary straight on
+#       PATH. It shells out to `emacs` (provided by emacs-nox in step 1).
+#     - openspec (https://github.com/Fission-AI/OpenSpec) — the OpenSpec CLI.
+#       Shared by every harness layer (pi and prime-agent both consume it),
+#       so it lives here in the base instead of in a per-harness layer.
+#       `@latest` per the upstream install instructions.
 # ---------------------------------------------------------------------------
+ARG NPM_VERSION=12.0.2
 ARG EASK_VERSION=0.12.9
-RUN npm install -g @emacs-eask/cli@${EASK_VERSION} \
+RUN npm install -g npm@${NPM_VERSION} \
+    && npm install -g @emacs-eask/cli@${EASK_VERSION} \
+    && npm install -g @fission-ai/openspec@latest \
     && npm cache clean --force
 
 # No WORKDIR/CMD here on purpose: each harness layer sets its own.
