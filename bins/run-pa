@@ -105,7 +105,20 @@ def build_envs(extra: list[str]) -> list[str]:
     Kept in a dict keyed by variable name so a later --env entry replaces an
     earlier passthrough of the same key (last one wins).
     """
-    envs: dict[str, str] = {"CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target"}
+    envs: dict[str, str] = {
+        "CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target",
+        # Container-private daemon supervisor registry. The default location
+        # (~/.prime/supervisor-owners) is shared with the host and other
+        # containers through the ~/.prime bind mount, but its records
+        # arbitrate *local* daemons by socket-path string + pid — both
+        # meaningless across containers, so concurrent runs corrupt each
+        # other's ownership ("supervisor generation ... no longer owns its
+        # registry entry"). /tmp is container-private and a container lives
+        # exactly as long as its daemon. Keep in sync with
+        # prime-agent/Dockerfile.
+        "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR":
+            "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR=/tmp/prime-agent-supervisor-owners",
+    }
     for key in PASSTHROUGH_KEYS:
         if os.environ.get(key) is not None:
             envs[key] = key  # bare KEY: container copies the host value

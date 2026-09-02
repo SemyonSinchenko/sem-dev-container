@@ -106,5 +106,18 @@ run-pi --dry-run             # print the podman/docker command without running
   (world-writable) during the image build, so it works under any runtime
   UID incl. `--userns=keep-id`. Bump `PRIME_AGENT_VERSION` in
   `prime-agent/Dockerfile` to upgrade.
+- Concurrent `run-pa` containers (different project folders) are safe: the
+  daemon supervisor registry is moved to the container-private
+  `/tmp/prime-agent-supervisor-owners` via
+  `PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR` (set in both
+  `prime-agent/Dockerfile` and `bins/run-pa`). The default location,
+  `~/.prime/supervisor-owners`, is "global per user, one machine" state whose
+  records arbitrate local daemons by socket-path string + pid — both
+  meaningless across containers, so a shared registry let the second
+  container's daemon steal the first one's entry and killed its daemon with
+  "supervisor generation ... no longer owns its registry entry". Sessions,
+  auth, and config still live in the shared host `~/.prime`; only daemon
+  ownership arbitration becomes per-container. Container `/tmp` needs no
+  mount — it is private per container.
 - Bind-mount host caches onto `/cache/*` to share downloads across runs
   (see `shared/Dockerfile` step 7b for the full list).
