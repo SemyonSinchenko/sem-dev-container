@@ -182,7 +182,7 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     INSTALLER_NO_MODIFY_PATH=1
 
-ARG UV_VERSION=0.12.5
+ARG UV_VERSION=0.12.9
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
 ARG PYTHON_DEFAULT=3.14
@@ -256,7 +256,7 @@ RUN mkdir -p /cache/coursier /cache/uv /cache/pip /cache/poetry /cache/maven /ca
 #    we preserve that layout under /opt and put bin/ on PATH (a symlink into
 #    /usr/local/bin would break the lib/ lookup).
 # ---------------------------------------------------------------------------
-ARG HARDWOOD_VERSION=1.0.0.Final
+ARG HARDWOOD_VERSION=1.1.0.Beta1
 RUN curl -fsSL "https://github.com/hardwood-hq/hardwood/releases/download/v${HARDWOOD_VERSION}/hardwood-cli-${HARDWOOD_VERSION}-linux-x86_64.tar.gz" \
         | tar xz -C /opt \
     && ln -sfn "/opt/hardwood-cli-${HARDWOOD_VERSION}-linux-x86_64" /opt/hardwood-cli
@@ -270,7 +270,7 @@ ENV PATH=/opt/hardwood-cli/bin:$PATH
 #     (dirs are world-writable, matching the cargo/uv pattern). The build and
 #     module caches are redirected to /cache for host bind-mount sharing.
 # ---------------------------------------------------------------------------
-ARG GO_VERSION=1.27.0
+ARG GO_VERSION=1.27.1
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar xz -C /opt
 ENV GOROOT=/opt/go \
     GOPATH=/opt/gopath \
