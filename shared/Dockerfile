@@ -166,7 +166,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG BUF_VERSION=1.72.0
+ARG BUF_VERSION=1.73.0
 RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-$(uname -s)-$(uname -m)" \
         -o /usr/local/bin/buf \
     && chmod +x /usr/local/bin/buf
@@ -182,7 +182,7 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     INSTALLER_NO_MODIFY_PATH=1
 
-ARG UV_VERSION=0.12.9
+ARG UV_VERSION=0.12.14
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
 ARG PYTHON_DEFAULT=3.14
@@ -217,7 +217,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
-ARG RUST_VERSION=1.98.0
+ARG RUST_VERSION=1.98.1
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -296,13 +296,15 @@ RUN --mount=type=cache,target=/cache/go-build \
 #     - openspec (https://github.com/Fission-AI/OpenSpec) — the OpenSpec CLI.
 #       Shared by every harness layer (pi and prime-agent both consume it),
 #       so it lives here in the base instead of in a per-harness layer.
-#       `@latest` per the upstream install instructions.
+#       Pinned (matches the npm dist-tag latest at bump time); bump
+#       OPENSPEC_VERSION to upgrade.
 # ---------------------------------------------------------------------------
 ARG NPM_VERSION=12.0.2
 ARG EASK_VERSION=0.12.9
+ARG OPENSPEC_VERSION=1.13.0
 RUN npm install -g npm@${NPM_VERSION} \
     && npm install -g @emacs-eask/cli@${EASK_VERSION} \
-    && npm install -g @fission-ai/openspec@latest \
+    && npm install -g @fission-ai/openspec@${OPENSPEC_VERSION} \
     && npm cache clean --force
 
 # No WORKDIR/CMD here on purpose: each harness layer sets its own.
