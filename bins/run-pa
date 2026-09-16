@@ -99,6 +99,20 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     return specs
 
 
+def build_tmpfs_mounts() -> list[str]:
+    """Container-private state nested beneath the shared ~/.prime bind mount.
+
+    Daemon worker descriptors identify their supervisor by the socket-path
+    string. Every container's private /tmp gives the default daemon the same
+    string (/tmp/prime-agent-0/daemon.sock), so persisting descriptors in the
+    host-mounted ~/.prime makes a later container try to adopt workers that
+    only existed in an earlier container. Unlike sessions, worker descriptors
+    and their recovery journals have exactly the lifetime of the container.
+    """
+    # Prime Agent's agentDir is ~/.prime/agent (not ~/.prime itself).
+    return ["/root/.prime/agent/daemon-workers:rw,mode=0700"]
+
+
 def build_envs(extra: list[str]) -> list[str]:
     """-e specs: fixed, then passthrough keys set on the host, then --env extras.
 
@@ -177,6 +191,10 @@ def main(argv: list[str] | None = None) -> int:
     cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
     for spec in build_mounts(home, pwd, args.selinux):
         cmd += ["-v", spec]
+    # This nested tmpfs masks only daemon-lifetime state; ~/.prime's sessions,
+    # auth, and configuration remain on the host bind mount above.
+    for target in build_tmpfs_mounts():
+        cmd += ["--tmpfs", target]
     cmd += ["-w", str(pwd)]
     for env in build_envs(args.env):
         cmd += ["-e", env]
