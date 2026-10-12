@@ -13,8 +13,8 @@ base image carries all compilers, runtimes, and tools; each agent harness
 │ shared (heavy, ~everything)                                    │
 │  Ubuntu 24.04 base                                             │
 │  • build-essential, cmake, protoc, gdb (built from source)     │
-│  • Java 8/11/17/21 (+use-java), sbt, Maven (cache → /cache)    │
-│  • Node 22, buf, uv + Python 3.10–3.14, poetry, pre-commit,   │
+│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache) │
+│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit,   │
 │    openspec CLI                                               │
 │  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy │
 │  • Go + open-spdd, hardwood-cli (Parquet)                      │

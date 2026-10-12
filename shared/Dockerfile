@@ -86,7 +86,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
 #     /usr/local, which is already on PATH, so `gdb` is immediately usable.
 #     Build artifacts are removed to keep the layer small.
 # ---------------------------------------------------------------------------
-ARG GDB_VERSION=17.2
+ARG GDB_VERSION=18.1
 RUN cd /tmp \
     && curl -fsSL "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.gz" -o gdb.tar.gz \
     && tar xzf gdb.tar.gz \
@@ -97,9 +97,14 @@ RUN cd /tmp \
     && cd / && rm -rf /tmp/gdb*
 
 # ---------------------------------------------------------------------------
-# 2. Java 8 / 11 / 17 / 21 (Eclipse Temurin from Adoptium) + a `use-java` helper.
-#    Default is 21; switch at runtime with:  use-java 17
+# 2. Java 8 / 11 / 17 / 21 / 25 (Eclipse Temurin from Adoptium) + a `use-java`
+#    helper. Default is JAVA_DEFAULT (21); switch at runtime with:  use-java 25
+#    Temurin's update-alternatives priority grows with the JDK version, so in
+#    auto mode the newest install (25) would silently become the default. Pin
+#    the java/javac alternatives to JAVA_DEFAULT explicitly after the install;
+#    the `current` symlink below then follows the pinned javac again.
 # ---------------------------------------------------------------------------
+ARG JAVA_DEFAULT=21
 RUN --mount=type=cache,target=/var/cache/apt \
     install -d /etc/apt/keyrings \
     && wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public \
@@ -112,10 +117,13 @@ RUN --mount=type=cache,target=/var/cache/apt \
         temurin-11-jdk \
         temurin-17-jdk \
         temurin-21-jdk \
+        temurin-25-jdk \
     && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --set java  "/usr/lib/jvm/temurin-${JAVA_DEFAULT}-jdk-$(dpkg --print-architecture)/bin/java" \
+    && update-alternatives --set javac "/usr/lib/jvm/temurin-${JAVA_DEFAULT}-jdk-$(dpkg --print-architecture)/bin/javac" \
     && ln -sfn "$(dirname "$(dirname "$(readlink -f /usr/bin/javac)")")" /usr/lib/jvm/current
 
-# Helper to flip the active JDK: `use-java 8|11|17|21`
+# Helper to flip the active JDK: `use-java 8|11|17|21|25`
 RUN cat > /usr/local/bin/use-java <<'EOF' && chmod +x /usr/local/bin/use-java
 #!/bin/sh
 set -e
@@ -172,7 +180,7 @@ RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION
     && chmod +x /usr/local/bin/buf
 
 # ---------------------------------------------------------------------------
-# 5. uv (installs system-wide) + poetry + pre-commit as uv tools + Python 3.10-3.14.
+# 5. uv (installs system-wide) + poetry + pre-commit as uv tools + Python 3.10-3.15.
 #    UV_TOOL_BIN_DIR=/usr/local/bin puts `poetry`/`pre-commit` straight on PATH.
 #    Also used by the prime-agent layer to build its IPython kernel venv.
 # ---------------------------------------------------------------------------
@@ -182,15 +190,17 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     INSTALLER_NO_MODIFY_PATH=1
 
-ARG UV_VERSION=0.12.14
+ARG UV_VERSION=0.13.0
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
 ARG PYTHON_DEFAULT=3.14
-# Interpreters 3.10-3.14, exposed on PATH as python3.10 ... python3.14.
+# Interpreters 3.10-3.15, exposed on PATH as python3.10 ... python3.15.
 # A generic `python3`/`python` -> PYTHON_DEFAULT is provided so build scripts,
 # pre-commit hooks, etc. that assume `python3` exists actually find one.
-RUN uv python install 3.10 3.11 3.12 3.13 3.14 \
-    && for v in 3.10 3.11 3.12 3.13 3.14; do \
+# PYTHON_DEFAULT stays on 3.14 for now (3.15 released 2026-10-09); flip the
+# ARG once the ecosystem has caught up.
+RUN uv python install 3.10 3.11 3.12 3.13 3.14 3.15 \
+    && for v in 3.10 3.11 3.12 3.13 3.14 3.15; do \
          ln -sf "$(uv python find $v)" /usr/local/bin/python$v; \
        done \
     && ln -sf /usr/local/bin/python${PYTHON_DEFAULT} /usr/local/bin/python3 \
@@ -217,7 +227,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
-ARG RUST_VERSION=1.98.1
+ARG RUST_VERSION=1.99.0
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -256,7 +266,7 @@ RUN mkdir -p /cache/coursier /cache/uv /cache/pip /cache/poetry /cache/maven /ca
 #    we preserve that layout under /opt and put bin/ on PATH (a symlink into
 #    /usr/local/bin would break the lib/ lookup).
 # ---------------------------------------------------------------------------
-ARG HARDWOOD_VERSION=1.1.0.Beta1
+ARG HARDWOOD_VERSION=1.1.0.Beta2
 RUN curl -fsSL "https://github.com/hardwood-hq/hardwood/releases/download/v${HARDWOOD_VERSION}/hardwood-cli-${HARDWOOD_VERSION}-linux-x86_64.tar.gz" \
         | tar xz -C /opt \
     && ln -sfn "/opt/hardwood-cli-${HARDWOOD_VERSION}-linux-x86_64" /opt/hardwood-cli
@@ -270,7 +280,7 @@ ENV PATH=/opt/hardwood-cli/bin:$PATH
 #     (dirs are world-writable, matching the cargo/uv pattern). The build and
 #     module caches are redirected to /cache for host bind-mount sharing.
 # ---------------------------------------------------------------------------
-ARG GO_VERSION=1.27.1
+ARG GO_VERSION=1.27.2
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | tar xz -C /opt
 ENV GOROOT=/opt/go \
     GOPATH=/opt/gopath \
@@ -299,9 +309,9 @@ RUN --mount=type=cache,target=/cache/go-build \
 #       Pinned (matches the npm dist-tag latest at bump time); bump
 #       OPENSPEC_VERSION to upgrade.
 # ---------------------------------------------------------------------------
-ARG NPM_VERSION=12.0.2
+ARG NPM_VERSION=12.2.0
 ARG EASK_VERSION=0.12.9
-ARG OPENSPEC_VERSION=1.13.0
+ARG OPENSPEC_VERSION=1.14.1
 RUN npm install -g npm@${NPM_VERSION} \
     && npm install -g @emacs-eask/cli@${EASK_VERSION} \
     && npm install -g @fission-ai/openspec@${OPENSPEC_VERSION} \
