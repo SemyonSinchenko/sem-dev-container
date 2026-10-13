@@ -2,26 +2,23 @@
 
 Layered dev containers for agentic development. A single heavy **shared**
 base image carries all compilers, runtimes, and tools; each agent harness
-(pi, prime-agent) is a thin layer on top.
+(pi, prime-agent, dsh) is a thin layer on top.
 
-```
-┌────────────────────────────┐   ┌──────────────────────────────┐
-│ pi (thin)                  │   │ prime-agent (thin)           │
-│  • pi coding agent         │   │  • prime-agent CLI           │
-│  • openspec CLI (shared)   │   │  • IPython kernel venv       │
-├────────────────────────────┴───┴──────────────────────────────┤
-│ shared (heavy, ~everything)                                    │
-│  Ubuntu 24.04 base                                             │
-│  • build-essential, cmake, protoc, gdb (built from source)     │
-│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache) │
-│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit,   │
-│    openspec CLI                                               │
-│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy │
-│  • Go + open-spdd, hardwood-cli (Parquet)                      │
-│  • fd/rg preinstalled so agents reuse them                     │
-│  • shared caches under /cache for host bind-mounts             │
-└────────────────────────────────────────────────────────────────┘
-```
+┌────────────────────────┐   ┌──────────────────────┐   ┌───────────────────────┐
+│ pi (thin)              │   │ prime-agent (thin)   │   │ dsh (thin)            │
+│ • pi coding agent      │   │ • prime-agent CLI    │   │ • dsh web (npm) + pnpm│
+│ • openspec CLI (shared)│   │ • IPython kernel venv│   │ • RPC for dsh-emacs   │
+├────────────────────────┴──────────────────────────┴───────────────────────────┤
+│ shared (heavy, ~everything)                                                   │
+│  Ubuntu 24.04 base                                                            │
+│  • build-essential, cmake, protoc, gdb (built from source)                    │
+│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                │
+│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI      │
+│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                │
+│  • Go + open-spdd, hardwood-cli (Parquet)                                     │
+│  • fd/rg preinstalled so agents reuse them                                    │
+│  • shared caches under /cache for host bind-mounts                            │
+└───────────────────────────────────────────────────────────────────────────────┘
 
 ## Build
 
@@ -29,7 +26,8 @@ base image carries all compilers, runtimes, and tools; each agent harness
 make shared        # podman build -f shared/Dockerfile -t dev-shared .
 make pi            # + pi agent
 make prime-agent   # + prime-agent agent
-make all           # both
+make dsh           # + DeepSeek Harness (dsh web profile)
+make all           # all three
 ```
 
 Docker instead of podman: `make ENGINE=docker all`.
@@ -46,6 +44,10 @@ podman run --rm -it -v "$PWD:/work" dev-pi
 # prime-agent (run inside the project dir it should work on)
 cd /path/to/project
 podman run --rm -it -v "$PWD:/work" -w /work dev-prime-agent
+
+# dsh — use run-dsh: it mounts caches/state and picks a free host port
+cd /path/to/project
+run-dsh
 ```
 
 ## Layout
@@ -57,25 +59,29 @@ podman run --rm -it -v "$PWD:/work" -w /work dev-prime-agent
 | `prime-agent/Dockerfile` | `FROM dev-shared` + prime-agent + its IPython kernel venv |
 | `bins/run-pi`          | run the `dev-pi` container with host caches/state mounted |
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
+| `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789 |
+| `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + the foreground wrapper |
+| `dsh/dsh-web-entry`    | container-side wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
-| `Makefile`             | build targets (`make shared|pi|prime-agent|all`) |
+| `Makefile`             | build targets (`make shared|pi|prime-agent|dsh|all`) |
 
-## Running: bins/run-pi and bins/run-pa
+## Running: bins/run-pi, run-pa, and run-dsh
 
-The old `run-pi` bash function in `.bashrc` is replaced by two standalone
+The old `run-pi` bash function in `.bashrc` is replaced by standalone
 Python 3 scripts (stdlib only, Python 3.10+), one per harness. Symlink them
 into `~/.local/bin` (or anywhere on `$PATH`):
 
 ```sh
 ln -s ~/sem-dev-container/bins/run-pi ~/.local/bin/run-pi
 ln -s ~/sem-dev-container/bins/run-pa ~/.local/bin/run-pa
+ln -s ~/sem-dev-container/bins/run-dsh ~/.local/bin/run-dsh
 ```
 
-Both scripts do what the bash function did: `mkdir -p` the host cache dirs,
+The scripts do what the bash function did: `mkdir -p` the host cache dirs,
 mount them into `/cache/*` and `/usr/local/cargo/registry`, mount the agent
-state dir (`~/.pi` for pi, `~/.prime` for prime-agent) to `/root`, mount the
-current dir at the same path, attach a per-project named volume for
-`/target`, and pass through API keys that are set on the host.
+state dir (`~/.pi` for pi, `~/.prime` for prime-agent, `~/.dsh` for dsh) to
+`/root`, mount the current dir at the same path, attach a per-project named
+volume for `/target`, and pass through API keys that are set on the host.
 
 ```sh
 run-pi                       # start the pi agent in $PWD
@@ -97,6 +103,42 @@ run-pi --dry-run             # print the podman/docker command without running
 
 > Script options must come before `--` or `--exec`; everything after is
 > container-side.
+
+### DeepSeek Harness: bins/run-dsh
+
+`run-dsh` starts the dsh web profile (server + web UI) on the current
+project folder and attaches to its logs:
+
+```sh
+cd /path/to/project
+run-dsh                        # foreground: logs stream; Ctrl-D or Ctrl-C stops it
+run-dsh -- --verbose           # flags after -- go to `dsh web` (container side)
+run-dsh --shell                # bash in the container instead of the server
+run-dsh --dry-run              # print the podman command
+```
+
+Port: the container serves on 3080; `run-dsh` publishes it on
+`127.0.0.1:<port>` with a free port picked from the rare range
+**30780–30789**, so up to 10 sessions can run in parallel (different
+project folders; harness state in `~/.dsh` is shared). It also passes
+`--public-url`/`--trusted-host`, so the server's `dsh web:
+http://127.0.0.1:<port>/?token=…` line is valid from the host as printed.
+
+Connect Emacs ([dsh-emacs](https://github.com/vritser/dsh-emacs)) to the
+printed URL:
+
+```emacs-lisp
+(add-to-list 'load-path (expand-file-name "~/dsh-emacs"))
+(require 'dsh-emacs)
+(setq dsh-emacs-server-auto-start nil)  ; never spawn a host dsh behind the container
+;; M-x dsh-emacs-edit-config, then paste the URL run-dsh printed, e.g.
+;;   http://127.0.0.1:30781/?token=...      (token changes every run)
+```
+
+The same URL opens the Web UI in a host browser for the initial
+provider/model setup (Settings → Models); the key persists in `~/.dsh`
+across runs. Ctrl-D (stdin EOF) and Ctrl-C (SIGINT) both stop the harness
+gracefully and remove the container.
 
 ## Notes
 
@@ -125,3 +167,14 @@ run-pi --dry-run             # print the podman/docker command without running
   mount — it is private per container.
 - Bind-mount host caches onto `/cache/*` to share downloads across runs
   (see `shared/Dockerfile` step 7b for the full list).
+- dsh containers share the host `~/.dsh` (profiles, plugins, provider keys,
+  sessions) the way prime-agent shares `~/.prime`. The web profile
+  initializes on first use into that directory — the first `run-dsh` on a
+  machine runs pnpm once (the image installs pnpm 11 for it; the dsh npm
+  package resolves pnpm from PATH), later runs start instantly. Parallel
+  `run-dsh` containers in different project folders share that state
+  read-mostly; two servers on the *same* workspace is not a supported
+  shape. dsh rejects wildcard bind addresses by design, so
+  `dsh/dsh-web-entry` binds the container's own IP and `run-dsh` publishes
+  the port on `127.0.0.1` only — dsh-emacs and the browser are expected on
+  the same machine.

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# dsh-web-entry — foreground wrapper for `dsh web` inside the dev-dsh
+# container; the CMD behind bins/run-dsh.
+#
+# The launcher attaches a terminal and streams the server logs. This script
+# stops the harness and exits the container when
+#   - you press Ctrl-D (stdin hits EOF),
+#   - you press Ctrl-C (SIGINT; dsh shuts itself down gracefully),
+#   - the server exits by itself (crash or completion), or
+#   - podman stop TERMs this process (relayed as dsh's stop request).
+# The script's exit status is the harness's.
+#
+# dsh rejects wildcard bind addresses (binding every interface would expose
+# the harness to the network), and podman's published port forwards to the
+# container address — so bind the container's own IP from `hostname -i`,
+# exactly what the dsh webserver docs suggest for container use. The
+# host-facing side (publish spec, --public-url, --trusted-host) belongs to
+# bins/run-dsh; the container-side port stays fixed (override: DSH_PORT).
+#
+# Extra flags after these are forwarded to `dsh web` (see run-dsh --).
+
+set -u
+
+host=$(hostname -i 2>/dev/null | awk '{print $1}')
+if [ -z "$host" ]; then
+    echo "dsh-web-entry: cannot determine the container address (hostname -i)" >&2
+    exit 1
+fi
+
+dsh web --host "$host" --port "${DSH_PORT:-3080}" --no-open "$@" &
+pid=$!
+
+# stdin watcher: read the attached terminal until EOF (Ctrl-D), then stop the
+# harness. The subshell ignores SIGINT — Ctrl-C must interrupt only the
+# harness (the TTY line discipline signals the whole foreground group).
+( trap '' INT; cat >/dev/null 2>&1; kill -TERM "$pid" 2>/dev/null ) &
+feeder=$!
+
+# Ctrl-C hits this script too; stay alive so dsh's own graceful shutdown
+# can finish. `podman stop` TERMs PID 1 only — relay it as the harness's
+# stop request.
+trap ':' INT
+trap 'kill -TERM "$pid" 2>/dev/null' TERM
+
+# Park here until the harness exits. A trapped signal interrupts the wait
+# with status >= 128 while the child is still alive: keep waiting. Once
+# wait reaps the child, its status is the result.
+status=0
+while :; do
+    wait "$pid"; status=$?
+    kill -0 "$pid" 2>/dev/null || break
+done
+kill "$feeder" 2>/dev/null
+exit "$status"

@@ -4,24 +4,27 @@
 #   make shared        # build the heavy shared base only
 #   make pi            # shared + pi harness (default engine: podman)
 #   make prime-agent   # shared + prime-agent harness
-#   make all           # both harnesses
+#   make dsh           # shared + DeepSeek Harness (dsh web profile)
+#   make all           # all three harnesses
 #
 # Override the engine or tags freely:
 #   make ENGINE=docker pi
 #   make TAG_SHARED=myreg/dev-shared:1.0 TAG_PI=myreg/dev-pi:1.0 all
 #
 # All builds use the repo root as context (the shared layer COPYs
-# .m2/settings.xml), so run make from the repo root.
+# .m2/settings.xml, the dsh layer COPYs dsh/dsh-web-entry), so run make
+# from the repo root.
 
 ENGINE       ?= podman
 TAG_SHARED   ?= dev-shared
 TAG_PI       ?= dev-pi
 TAG_PRIME    ?= dev-prime-agent
+TAG_DSH      ?= dev-dsh
 CONTEXT      := .
 
-.PHONY: all shared pi prime-agent
+.PHONY: all shared pi prime-agent dsh
 
-all: pi prime-agent
+all: pi prime-agent dsh
 
 shared:
 	$(ENGINE) build -f shared/Dockerfile -t $(TAG_SHARED) $(CONTEXT)
@@ -32,4 +35,8 @@ pi: shared
 
 prime-agent: shared
 	$(ENGINE) build -f prime-agent/Dockerfile -t $(TAG_PRIME) \
+		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)
+
+dsh: shared
+	$(ENGINE) build -f dsh/Dockerfile -t $(TAG_DSH) \
 		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)

@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+"""
+run-dsh — run the DeepSeek Harness dev container (dev-dsh) with host
+caches/state mounted, attached to its logs.
+
+dsh (https://github.com/deepseek-ai/deepseek-harness) serves a web UI and
+an RPC surface used by clients such as dsh-emacs
+(https://github.com/vritser/dsh-emacs). The container binds the harness to
+its own address on the container-side port 3080; run-dsh publishes it on
+the host at 127.0.0.1:<port>, picking a free port from the rare range
+30780-30789 so up to 10 sessions can run in parallel (one project folder
+per container; the harness state in ~/.dsh is shared).
+
+The launcher is foreground by design: it streams the server logs, and
+Ctrl-D (stdin EOF) or Ctrl-C (SIGINT) stops the harness and removes the
+container. The server prints its URL with the launch token, e.g.
+
+    dsh web: http://127.0.0.1:30781/?token=...
+
+Paste that URL into dsh-emacs (dsh-emacs-base-url) or set its token
+(dsh-emacs-server-auth-token); see README.md. The same URL opens the Web
+UI in a host browser for model/provider setup. The token changes per run.
+
+Examples:
+  run-dsh                       # start dsh web in $PWD and follow its logs
+  run-dsh -- --port 1234        # flags after -- go to `dsh web` (container side)
+  run-dsh --shell               # drop into bash in the container (no server)
+  run-dsh --exec dsh --help     # run an arbitrary command instead of the server
+  run-dsh --engine docker       # use docker instead of podman
+  run-dsh --dry-run             # print the command instead of running it
+
+Script options must come before `--` or `--exec`; everything after is
+container-side.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+IMAGE = "dev-dsh"               # default image (override with --image)
+ENTRY = "dsh-web-entry"         # foreground wrapper installed by dsh/Dockerfile
+STATE_DIR = ".dsh"              # host $HOME/.dsh  ->  /root/.dsh (DSH_HOME)
+AGENTS_DIR = ".agents"          # host $HOME/.agents (dsh AGENTS_HOME)
+CONTAINER_PORT = 3080           # dsh web port inside the container (fixed)
+HOST_BIND = "127.0.0.1"         # host-side publish address; loopback: dsh-emacs
+                                # and the browser run on this machine. The bind
+                                # feeds -p, --public-url and --trusted-host, so
+                                # change all three together if it ever moves.
+PORT_BASE = 30780               # rare host port range for parallel sessions:
+PORT_COUNT = 10                 # 30780-30789, below the ephemeral range.
+VOLUME_PREFIX = "dsh-target"    # named volume per project: dsh-target<escaped pwd> -> /target
+
+# Env vars copied into the container when set on the host (`-e KEY` passes
+# the host value through; unset keys are skipped). Same list as run-pi/run-pa;
+# dsh reads provider keys from its settings (Web UI -> Models) and honors
+# per-provider apiKeyEnv overrides.
+PASSTHROUGH_KEYS = [
+    "ZAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "XAI_API_KEY",
+    "PRIME_API_KEY",
+]
+
+
+def resolve_engine(engine: str) -> str:
+    """Pick a container engine: explicit choice, or auto (podman -> docker)."""
+    if engine and engine != "auto":
+        return engine
+    for candidate in ("podman", "docker"):
+        if shutil.which(candidate):
+            return candidate
+    sys.exit("error: no container engine found (tried podman, docker)")
+
+
+def ensure_mount_sources(home: Path, pwd: Path) -> None:
+    """Create host dirs that will be bind-mounted (podman refuses to create them)."""
+    dirs = [
+        pwd,
+        home / STATE_DIR,
+        home / AGENTS_DIR,
+        home / ".cargo/registry",
+        home / ".cache/coursier",
+        home / ".ivy2",
+        home / ".cache/uv",
+        home / ".cache/pip",
+        home / ".cache/pypoetry",
+        home / ".m2/repository",
+    ]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
+    """-v specs: bind mounts (host:container) + the per-project named volume."""
+    z = ":z" if selinux else ""
+    specs = [
+        f"{pwd}:{pwd}{z}",
+        f"{home / STATE_DIR}:/root/{STATE_DIR}{z}",
+        f"{home / AGENTS_DIR}:/root/{AGENTS_DIR}{z}",
+        f"{home / '.cargo/registry'}:/usr/local/cargo/registry{z}",
+        f"{home / '.cache/coursier'}:/cache/coursier{z}",
+        f"{home / '.ivy2'}:/cache/ivy2{z}",
+        f"{home / '.cache/uv'}:/cache/uv{z}",
+        f"{home / '.cache/pip'}:/cache/pip{z}",
+        f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
+        f"{home / '.m2/repository'}:/cache/maven{z}",
+    ]
+    # Named (docker-managed) volume, one per host project dir, so builds the
+    # dsh agent runs in the workspace keep their target dir across runs.
+    volume = VOLUME_PREFIX + str(pwd).replace("/", "_")
+    specs.append(f"{volume}:/target")
+    return specs
+
+
+def build_envs(extra: list[str]) -> list[str]:
+    """-e specs: fixed, then passthrough keys set on the host, then --env extras.
+
+    Kept in a dict keyed by variable name so a later --env entry replaces an
+    earlier passthrough of the same key (last one wins).
+    """
+    envs: dict[str, str] = {
+        "CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target",
+    }
+    for key in PASSTHROUGH_KEYS:
+        if os.environ.get(key) is not None:
+            envs[key] = key  # bare KEY: container copies the host value
+    for spec in extra:
+        envs[spec.split("=", 1)[0]] = spec
+    return list(envs.values())
+
+
+def pick_free_port() -> int:
+    """First host port in the run-dsh range nothing is listening on yet."""
+    for port in range(PORT_BASE, PORT_BASE + PORT_COUNT):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((HOST_BIND, port))
+            except OSError:
+                continue
+            return port
+    sys.exit(
+        f"error: host ports {PORT_BASE}-{PORT_BASE + PORT_COUNT - 1} are all busy; "
+        "stop an old run-dsh session or raise PORT_COUNT"
+    )
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="run-dsh",
+        description="Run the DeepSeek Harness dev container (dev-dsh) with host caches/state "
+                    "mounted, attached to the server logs (Ctrl-D/Ctrl-C stops it).",
+        epilog="Non-flag arguments are passed to the `dsh web` command (use -- to start them). "
+               "Script options must come before `--`/`--exec`: everything after is container-side.",
+    )
+    p.add_argument("--shell", action="store_true",
+                   help="drop into an interactive bash shell instead of the server "
+                        "(no port is published)")
+    p.add_argument("--exec", dest="exec_cmd", nargs=argparse.REMAINDER, metavar="CMD",
+                   help="run CMD... as-is instead of the server (e.g. --exec dsh --help)")
+    p.add_argument("--engine", default="auto", metavar="ENGINE",
+                   help="container engine: podman, docker, or auto (default: auto)")
+    p.add_argument("--image", default=IMAGE, metavar="TAG",
+                   help=f"image to run (default: {IMAGE})")
+    p.add_argument("--no-selinux", dest="selinux", action="store_false", default=True,
+                   help="omit the :z suffix on bind mounts (non-SELinux hosts)")
+    p.add_argument("--env", action="append", default=[], metavar="KEY[=VALUE]",
+                   help="extra env var to pass into the container (repeatable); "
+                        "KEY alone passes the host value through")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the command and exit without running it")
+    p.add_argument("agent_args", nargs="*", metavar="ARG",
+                   help="extra arguments forwarded to `dsh web` inside the container")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    home = Path.home()
+    pwd = Path.cwd()
+    engine = resolve_engine(args.engine)
+
+    ensure_mount_sources(home, pwd)
+
+    cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
+    for spec in build_mounts(home, pwd, args.selinux):
+        cmd += ["-v", spec]
+    cmd += ["-w", str(pwd)]
+    for env in build_envs(args.env):
+        cmd += ["-e", env]
+
+    port: int | None = None
+    if args.shell:
+        cmd += [args.image, "bash"]
+    elif args.exec_cmd:
+        cmd += [args.image] + args.exec_cmd
+    else:
+        port = pick_free_port()
+        cmd += ["-p", f"{HOST_BIND}:{port}:{CONTAINER_PORT}"]
+        # --public-url makes dsh print (and advertise) the host-mapped URL,
+        # so the `dsh web: .../?token=...` line works unchanged in a host
+        # browser or dsh-emacs; --trusted-host admits that mapped authority
+        # at the /api browser-trust fence (advertising alone grants no trust).
+        cmd += [args.image, ENTRY,
+                "--public-url", f"http://{HOST_BIND}:{port}",
+                "--trusted-host", f"{HOST_BIND}:{port}"]
+        cmd += args.agent_args
+
+    if args.dry_run:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return 0
+
+    if port is not None:
+        print(f"dsh web (host): http://{HOST_BIND}:{port} — paste the `dsh web: …/?token=…` "
+              "URL printed below into dsh-emacs / the browser")
+        print(f"workspace:      {pwd}")
+        print("stop:           Ctrl-D or Ctrl-C")
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
