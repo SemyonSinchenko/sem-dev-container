@@ -10,30 +10,32 @@
 #   - podman stop TERMs this process (relayed as dsh's stop request).
 # The script's exit status is the harness's.
 #
-# dsh rejects wildcard bind addresses (binding every interface would expose
-# the harness to the network), and podman's published port forwards to the
-# container address — so bind the container's own IP from `hostname -i`,
-# exactly what the dsh webserver docs suggest for container use. The
-# host-facing side (publish spec, --public-url, --trusted-host) belongs to
-# bins/run-dsh; the container-side port stays fixed (override: DSH_PORT).
+# dsh >= 0.2.0 only ever binds a loopback address: 0.0.0.0 is refused at
+# runtime ("would expose remote code execution to the network"). Reaching
+# that loopback through podman's published port needs pasta's
+# --host-lo-to-ns-lo (passed by bins/run-dsh): without it pasta forwards
+# connections to a host loopback address to the namespace's public
+# address, where nothing listens. The container-side port stays fixed
+# (override: DSH_PORT).
 #
 # Extra flags after these are forwarded to `dsh web` (see run-dsh --).
 
 set -u
 
-host=$(hostname -i 2>/dev/null | awk '{print $1}')
-if [ -z "$host" ]; then
-    echo "dsh-web-entry: cannot determine the container address (hostname -i)" >&2
-    exit 1
-fi
+# Save the real stdin before any backgrounding: without job control a
+# non-interactive shell gives asynchronous commands stdin from /dev/null,
+# so the watcher below would see EOF at t=0 and TERM the harness at birth
+# (the silent exit-143 failure). An explicit <&3 redirection overrides
+# that implicit assignment; fd 3 is inherited by the subshell.
+exec 3<&0
 
-dsh web --host "$host" --port "${DSH_PORT:-3080}" --no-open "$@" &
+dsh web --host 127.0.0.1 --port "${DSH_PORT:-3080}" --no-open "$@" &
 pid=$!
 
 # stdin watcher: read the attached terminal until EOF (Ctrl-D), then stop the
 # harness. The subshell ignores SIGINT — Ctrl-C must interrupt only the
 # harness (the TTY line discipline signals the whole foreground group).
-( trap '' INT; cat >/dev/null 2>&1; kill -TERM "$pid" 2>/dev/null ) &
+( trap '' INT; cat <&3 >/dev/null 2>&1; kill -TERM "$pid" 2>/dev/null ) &
 feeder=$!
 
 # Ctrl-C hits this script too; stay alive so dsh's own graceful shutdown
@@ -51,4 +53,12 @@ while :; do
     kill -0 "$pid" 2>/dev/null || break
 done
 kill "$feeder" 2>/dev/null
+wait "$feeder" 2>/dev/null
+feeder_status=$?
+# A feeder that finished on its own read stdin to EOF (Ctrl-D): that stop
+# was deliberate, so report success instead of the TERM status we sent the
+# harness; any other status (crash, podman stop) propagates untouched.
+if [ "$feeder_status" -eq 0 ] && [ "$status" -eq 143 ]; then
+    status=0
+fi
 exit "$status"

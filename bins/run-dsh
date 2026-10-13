@@ -15,9 +15,12 @@ The launcher is foreground by design: it streams the server logs, and
 Ctrl-D (stdin EOF) or Ctrl-C (SIGINT) stops the harness and removes the
 container. The server prints its URL with the launch token, e.g.
 
-    dsh web: http://127.0.0.1:30781/?token=...
+    dsh web: http://127.0.0.1:3080/?token=...
 
-Paste that URL into dsh-emacs (dsh-emacs-base-url) or set its token
+That address is container-side (dsh >= 0.2.0 has no --public-url to
+advertise the mapping): open the 127.0.0.1:<port> URL this launcher
+prints first, carrying the token from the dsh web line below. Paste it
+into dsh-emacs (dsh-emacs-base-url) or set its token
 (dsh-emacs-server-auth-token); see README.md. The same URL opens the Web
 UI in a host browser for model/provider setup. The token changes per run.
 
@@ -49,10 +52,13 @@ ENTRY = "dsh-web-entry"         # foreground wrapper installed by dsh/Dockerfile
 STATE_DIR = ".dsh"              # host $HOME/.dsh  ->  /root/.dsh (DSH_HOME)
 AGENTS_DIR = ".agents"          # host $HOME/.agents (dsh AGENTS_HOME)
 CONTAINER_PORT = 3080           # dsh web port inside the container (fixed)
-HOST_BIND = "127.0.0.1"         # host-side publish address; loopback: dsh-emacs
-                                # and the browser run on this machine. The bind
-                                # feeds -p, --public-url and --trusted-host, so
-                                # change all three together if it ever moves.
+HOST_BIND = "127.0.0.1"         # host-side publish address; must stay loopback:
+                                # dsh-emacs and the browser run here, and pasta's
+                                # --host-lo-to-ns-lo (see the server branch in
+                                # main) delivers connections to this loopback
+                                # address into the container's loopback, where
+                                # dsh — loopback-only by design — listens. The
+                                # bind feeds -p and --trusted-host together.
 PORT_BASE = 30780               # rare host port range for parallel sessions:
 PORT_COUNT = 10                 # 30780-30789, below the ephemeral range.
 VOLUME_PREFIX = "dsh-target"    # named volume per project: dsh-target<escaped pwd> -> /target
@@ -206,26 +212,37 @@ def main(argv: list[str] | None = None) -> int:
         cmd += [args.image] + args.exec_cmd
     else:
         port = pick_free_port()
+        # dsh binds only the container's loopback, and pasta forwards
+        # published ports to the namespace's public address by default;
+        # --host-lo-to-ns-lo delivers connections made to a host loopback
+        # address (our -p bind below) to the namespace loopback instead.
+        # Docker has no equivalent: its DNAT only reaches the bridge.
+        if engine == "podman":
+            cmd += ["--network", "pasta:--host-lo-to-ns-lo"]
         cmd += ["-p", f"{HOST_BIND}:{port}:{CONTAINER_PORT}"]
-        # --public-url makes dsh print (and advertise) the host-mapped URL,
-        # so the `dsh web: .../?token=...` line works unchanged in a host
-        # browser or dsh-emacs; --trusted-host admits that mapped authority
-        # at the /api browser-trust fence (advertising alone grants no trust).
-        cmd += [args.image, ENTRY,
-                "--public-url", f"http://{HOST_BIND}:{port}",
-                "--trusted-host", f"{HOST_BIND}:{port}"]
+        # dsh >= 0.2.0 dropped --public-url: the server prints its
+        # container-side URL and the startup banner explains the 127.0.0.1
+        # mapping; --trusted-host admits that mapped authority at the /api
+        # browser-trust fence. Keep it last: it is variadic (<authority...>)
+        # and would swallow bare positional args passed via `run-dsh -- ...`.
+        cmd += [args.image, ENTRY]
         cmd += args.agent_args
+        cmd += ["--trusted-host", f"{HOST_BIND}:{port}"]
 
     if args.dry_run:
         print(" ".join(shlex.quote(c) for c in cmd))
         return 0
 
     if port is not None:
-        print(f"dsh web (host): http://{HOST_BIND}:{port} — paste the `dsh web: …/?token=…` "
-              "URL printed below into dsh-emacs / the browser")
+        print(f"dsh web (host): http://{HOST_BIND}:{port} — open it with /?token=… from the "
+              "dsh web line below (dsh-emacs / browser)")
         print(f"workspace:      {pwd}")
         print("stop:           Ctrl-D or Ctrl-C")
-    return subprocess.run(cmd).returncode
+    rc = subprocess.run(cmd).returncode
+    if rc != 0:
+        print(f"run-dsh: container exited with code {rc} — retry with "
+              "`run-dsh --exec <cmd>` to see the error", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":
