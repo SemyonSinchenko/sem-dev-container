@@ -80,8 +80,10 @@ ln -s ~/sem-dev-container/bins/run-dsh ~/.local/bin/run-dsh
 The scripts do what the bash function did: `mkdir -p` the host cache dirs,
 mount them into `/cache/*` and `/usr/local/cargo/registry`, mount the agent
 state dir (`~/.pi` for pi, `~/.prime` for prime-agent, `~/.dsh` for dsh) to
-`/root`, mount the current dir at the same path, attach a per-project named
-volume for `/target`, and pass through API keys that are set on the host.
+`/root`, mount the current dir at the same path with `.git` layered over it
+read-only (git writes fail inside the container; commit on the host), attach
+a per-project named volume for `/target`, and pass through API keys that are
+set on the host.
 
 ```sh
 run-pi                       # start the pi agent in $PWD

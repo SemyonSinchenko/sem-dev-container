@@ -122,6 +122,15 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
         f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
         f"{home / '.m2/repository'}:/cache/maven{z}",
     ]
+    # Re-mount .git read-only over the rw project mount above (a later -v
+    # entry wins): the agent can read history and diffs, but every git write
+    # (commit, push, stash, checkout, rebase) fails inside the container --
+    # commits belong on the host, signed with the operator's key (see
+    # APPEND_SYSTEM.md). Skipped for non-git projects: podman would create
+    # a stray .git/ dir in them.
+    git_dir = pwd / ".git"
+    if git_dir.exists():
+        specs.append(f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}")
     # Named (docker-managed) volume, one per host project dir, so builds the
     # dsh agent runs in the workspace keep their target dir across runs.
     volume = VOLUME_PREFIX + str(pwd).replace("/", "_")

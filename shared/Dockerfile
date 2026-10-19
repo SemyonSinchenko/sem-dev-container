@@ -142,6 +142,8 @@ ENV PATH=$JAVA_HOME/bin:$PATH
 # ---------------------------------------------------------------------------
 # 3. sbt (JVM tarball, arch-independent).
 # ---------------------------------------------------------------------------
+# Pinned to the sbt 1.x line: Spark builds require sbt 1.13.x and sbt 2.x is
+# not drop-in compatible with them, so don't bump past 1.x here.
 ARG SBT_VERSION=1.13.0
 RUN curl -fsSL "https://github.com/sbt/sbt/releases/download/v${SBT_VERSION}/sbt-${SBT_VERSION}.tgz" \
         | tar xz -C /opt \
@@ -174,7 +176,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG BUF_VERSION=1.73.0
+ARG BUF_VERSION=1.74.0
 RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-$(uname -s)-$(uname -m)" \
         -o /usr/local/bin/buf \
     && chmod +x /usr/local/bin/buf
@@ -190,7 +192,7 @@ ENV UV_INSTALL_DIR=/usr/local/bin \
     UV_TOOL_BIN_DIR=/usr/local/bin \
     INSTALLER_NO_MODIFY_PATH=1
 
-ARG UV_VERSION=0.13.0
+ARG UV_VERSION=0.13.1
 RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
 
 ARG PYTHON_DEFAULT=3.14
@@ -227,7 +229,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH
 
-ARG RUST_VERSION=1.99.0
+ARG RUST_VERSION=1.99.1
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
@@ -311,7 +313,7 @@ RUN --mount=type=cache,target=/cache/go-build \
 # ---------------------------------------------------------------------------
 ARG NPM_VERSION=12.2.0
 ARG EASK_VERSION=0.12.9
-ARG OPENSPEC_VERSION=1.14.1
+ARG OPENSPEC_VERSION=1.14.3
 RUN npm install -g npm@${NPM_VERSION} \
     && npm install -g @emacs-eask/cli@${EASK_VERSION} \
     && npm install -g @fission-ai/openspec@${OPENSPEC_VERSION} \

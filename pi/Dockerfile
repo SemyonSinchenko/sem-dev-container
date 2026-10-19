@@ -17,7 +17,7 @@ FROM ${BASE_IMAGE}
 # used to be installed here too, but it moved down into the shared base —
 # step 10 — so prime-agent gets it as well and this layer stays thin.)
 # ---------------------------------------------------------------------------
-ARG PI_VERSION=1.1.0
+ARG PI_VERSION=1.3.0
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_VERSION} \
     && npm cache clean --force
 

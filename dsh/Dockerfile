@@ -14,11 +14,11 @@
 ARG BASE_IMAGE=dev-shared
 FROM ${BASE_IMAGE}
 
-# Latest stable-track release (npm dist-tag `latest`, 2026-10-13). dsh is a
+# Latest stable-track release (npm dist-tag `latest`, 2026-10-19). dsh is a
 # developer preview that ships compatibility-breaking changes: bump this ARG
 # to upgrade. dsh-emacs 0.5.x targets the dsh 0.1.7 wire protocol and supports
 # servers 0.1.5 or newer, so this pin stays client-compatible.
-ARG DSH_VERSION=0.2.0-rc.2
+ARG DSH_VERSION=0.2.1-rc.2
 
 # The web profile auto-initializes on first use into $DSH_HOME/profiles/web
 # (default ~/.dsh) and installs its plugin dependencies through pnpm, which
