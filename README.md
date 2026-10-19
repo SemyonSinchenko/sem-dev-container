@@ -142,6 +142,21 @@ provider/model setup (Settings → Models); the key persists in `~/.dsh`
 across runs. Ctrl-D (stdin EOF) and Ctrl-C (SIGINT) both stop the harness
 gracefully and remove the container.
 
+## Web search (SearXNG)
+
+The host runs SearXNG 24/7 (quadlet
+`~/.config/containers/systemd/searxng.container`, published on host
+`127.0.0.1:7331`). All launchers run podman with `--network pasta:--map-gw`,
+which maps the container's gateway address to the host loopback, so
+containers reach the instance at `http://host.containers.internal:7331`.
+prime-agent gets the matching `searxng` skill from the host state dir
+(`~/.prime/agent/skills/searxng`), not from the image; override the URL with
+`SEARXNG_URL`.
+
+Docker cannot map host loopback (`--network pasta:...` is podman-only):
+publish the SearXNG port on a reachable address in the quadlet
+(`PublishPort=`) and run with `--env SEARXNG_URL=http://<host>:7331`.
+
 ## Notes
 
 - Base is Ubuntu 24.04. To share a compiled cache (e.g. cargo `target/`)

@@ -215,10 +215,15 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["-e", env]
 
     port: int | None = None
+    # --map-gw maps the container's gateway address to the host's loopback,
+    # so host services bound to 127.0.0.1 (e.g. the host SearXNG) are
+    # reachable as host.containers.internal:<port>. Docker has no equivalent:
+    # publish the service port on the host instead.
+    map_gw = ["--network", "pasta:--map-gw"] if engine == "podman" else []
     if args.shell:
-        cmd += [args.image, "bash"]
+        cmd += map_gw + [args.image, "bash"]
     elif args.exec_cmd:
-        cmd += [args.image] + args.exec_cmd
+        cmd += map_gw + [args.image] + args.exec_cmd
     else:
         port = pick_free_port()
         # dsh binds only the container's loopback, and pasta forwards
@@ -226,8 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         # --host-lo-to-ns-lo delivers connections made to a host loopback
         # address (our -p bind below) to the namespace loopback instead.
         # Docker has no equivalent: its DNAT only reaches the bridge.
-        if engine == "podman":
-            cmd += ["--network", "pasta:--host-lo-to-ns-lo"]
+        if map_gw:
+            cmd += [map_gw[0], "pasta:--host-lo-to-ns-lo,--map-gw"]
         cmd += ["-p", f"{HOST_BIND}:{port}:{CONTAINER_PORT}"]
         # dsh >= 0.2.0 dropped --public-url: the server prints its
         # container-side URL and the startup banner explains the 127.0.0.1

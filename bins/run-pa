@@ -207,6 +207,12 @@ def main(argv: list[str] | None = None) -> int:
     cmd += ["-w", str(pwd)]
     for env in build_envs(args.env):
         cmd += ["-e", env]
+    # pasta:--map-gw maps the container's gateway address to the host's
+    # loopback, so host services bound to 127.0.0.1 (e.g. the host SearXNG)
+    # are reachable as host.containers.internal:<port>. Docker has no
+    # equivalent: publish the service port on the host instead.
+    if engine == "podman":
+        cmd += ["--network", "pasta:--map-gw"]
     cmd.append(args.image)
     cmd += build_container_command(args)
 
