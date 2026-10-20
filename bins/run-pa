@@ -122,7 +122,7 @@ def build_tmpfs_mounts() -> list[str]:
     return ["/root/.prime/agent/daemon-workers:rw,mode=0700"]
 
 
-def build_envs(extra: list[str]) -> list[str]:
+def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
     """-e specs: fixed, then passthrough keys set on the host, then --env extras.
 
     Kept in a dict keyed by variable name so a later --env entry replaces an
@@ -142,6 +142,8 @@ def build_envs(extra: list[str]) -> list[str]:
         "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR":
             "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR=/tmp/prime-agent-supervisor-owners",
     }
+    if forward_searxng:
+        envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
     for key in PASSTHROUGH_KEYS:
         if os.environ.get(key) is not None:
             envs[key] = key  # bare KEY: container copies the host value
@@ -205,14 +207,13 @@ def main(argv: list[str] | None = None) -> int:
     for target in build_tmpfs_mounts():
         cmd += ["--tmpfs", target]
     cmd += ["-w", str(pwd)]
-    for env in build_envs(args.env):
+    for env in build_envs(args.env, forward_searxng=engine == "podman"):
         cmd += ["-e", env]
-    # pasta:--map-gw maps the container's gateway address to the host's
-    # loopback, so host services bound to 127.0.0.1 (e.g. the host SearXNG)
-    # are reachable as host.containers.internal:<port>. Docker has no
-    # equivalent: publish the service port on the host instead.
+    # Forward only container 127.0.0.1:7331 to host 127.0.0.1:7331 for the
+    # host SearXNG service. Docker has no equivalent: publish the service port
+    # on a host-reachable address and override SEARXNG_URL instead.
     if engine == "podman":
-        cmd += ["--network", "pasta:--map-gw"]
+        cmd += ["--network", "pasta:-T,7331"]
     cmd.append(args.image)
     cmd += build_container_command(args)
 

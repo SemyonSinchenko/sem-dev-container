@@ -10,13 +10,13 @@ base image carries all compilers, runtimes, and tools; each agent harness
 │ • openspec CLI (shared)│   │ • IPython kernel venv│   │ • RPC for dsh-emacs   │
 ├────────────────────────┴──────────────────────────┴───────────────────────────┤
 │ shared (heavy, ~everything)                                                   │
-│  Ubuntu 24.04 base                                                            │
+│  Ubuntu 26.04 base                                                            │
 │  • build-essential, cmake, protoc, gdb (built from source)                    │
 │  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                │
 │  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI      │
 │  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                │
 │  • Go + open-spdd, hardwood-cli (Parquet)                                     │
-│  • fd/rg preinstalled so agents reuse them                                    │
+│  • emacs-nox (30.x) + gnuplot; fd/rg preinstalled so agents reuse them        │
 │  • shared caches under /cache for host bind-mounts                            │
 └───────────────────────────────────────────────────────────────────────────────┘
 
@@ -146,20 +146,21 @@ gracefully and remove the container.
 
 The host runs SearXNG 24/7 (quadlet
 `~/.config/containers/systemd/searxng.container`, published on host
-`127.0.0.1:7331`). All launchers run podman with `--network pasta:--map-gw`,
-which maps the container's gateway address to the host loopback, so
-containers reach the instance at `http://host.containers.internal:7331`.
-prime-agent gets the matching `searxng` skill from the host state dir
-(`~/.prime/agent/skills/searxng`), not from the image; override the URL with
-`SEARXNG_URL`.
+`127.0.0.1:7331`). The Podman launchers use `--network pasta:-T,7331` to
+forward only container `127.0.0.1:7331` to host `127.0.0.1:7331`, and set
+`SEARXNG_URL=http://127.0.0.1:7331` in the container. This avoids depending
+on the container's dynamic gateway or Podman's `host.containers.internal`
+address. prime-agent gets the matching `searxng` skill from the host state
+dir (`~/.prime/agent/skills/searxng`), not from the image; an explicit
+`--env SEARXNG_URL=...` still overrides the launcher default.
 
-Docker cannot map host loopback (`--network pasta:...` is podman-only):
-publish the SearXNG port on a reachable address in the quadlet
-(`PublishPort=`) and run with `--env SEARXNG_URL=http://<host>:7331`.
+Docker has no pasta port-forwarding equivalent: publish the SearXNG port on
+a host-reachable address in the quadlet (`PublishPort=`) and run with
+`--env SEARXNG_URL=http://<host>:7331`.
 
 ## Notes
 
-- Base is Ubuntu 24.04. To share a compiled cache (e.g. cargo `target/`)
+- Base is Ubuntu 26.04 (emacs-nox ships Emacs 30.x). To share a compiled cache (e.g. cargo `target/`)
   with your host, match the base to your host distro/glibc.
 - Prime agent's kernel venv is prebuilt at `/opt/prime-agent/kernel-venv`
   (world-writable) during the image build, so it works under any runtime

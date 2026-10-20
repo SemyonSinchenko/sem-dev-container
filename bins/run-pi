@@ -103,13 +103,15 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     return specs
 
 
-def build_envs(extra: list[str]) -> list[str]:
+def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
     """-e specs: fixed, then passthrough keys set on the host, then --env extras.
 
     Kept in a dict keyed by variable name so a later --env entry replaces an
     earlier passthrough of the same key (last one wins).
     """
     envs: dict[str, str] = {"CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target"}
+    if forward_searxng:
+        envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
     for key in PASSTHROUGH_KEYS:
         if os.environ.get(key) is not None:
             envs[key] = key  # bare KEY: container copies the host value
@@ -169,14 +171,13 @@ def main(argv: list[str] | None = None) -> int:
     for spec in build_mounts(home, pwd, args.selinux):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
-    for env in build_envs(args.env):
+    for env in build_envs(args.env, forward_searxng=engine == "podman"):
         cmd += ["-e", env]
-    # pasta:--map-gw maps the container's gateway address to the host's
-    # loopback, so host services bound to 127.0.0.1 (e.g. the host SearXNG)
-    # are reachable as host.containers.internal:<port>. Docker has no
-    # equivalent: publish the service port on the host instead.
+    # Forward only container 127.0.0.1:7331 to host 127.0.0.1:7331 for the
+    # host SearXNG service. Docker has no equivalent: publish the service port
+    # on a host-reachable address and override SEARXNG_URL instead.
     if engine == "podman":
-        cmd += ["--network", "pasta:--map-gw"]
+        cmd += ["--network", "pasta:-T,7331"]
     cmd.append(args.image)
     cmd += build_container_command(args)
 

@@ -7,10 +7,10 @@
 #
 #   podman build -f shared/Dockerfile -t dev-shared .
 #
-# Base is Ubuntu 24.04 (noble). If you want to share a compiled cache with your
+# Base is Ubuntu 26.04 (resolute). If you want to share a compiled cache with your
 # host (see the target/ discussion), match this to your host distro/glibc
 # instead.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -68,7 +68,8 @@ RUN --mount=type=cache,target=/var/cache/apt \
         # ---
         ripgrep \
         fd-find \
-        # --- editor + plotting: emacs-nox for elisp development (byte-compiler,
+        # --- editor + plotting: emacs-nox (Emacs 30.x on this base) for elisp
+        #     development (byte-compiler,
         #     batch mode, ielm all work headlessly); gnuplot-nox so agents can
         #     run/debug gnuplot scripts and render to PNG/SVG/dumb terminal.
         #     -nox variants avoid pulling X11/Qt into the image.
