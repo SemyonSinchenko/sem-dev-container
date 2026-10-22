@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# dsh-acp-entry — foreground ACP stdio server for the dev-dsh container.
+#
+# The container command behind `run-dsh --acp`. Unlike dsh-web-entry it never
+# backgrounds the harness, never reads stdin, and never prints a banner: stdin,
+# stdout, stderr and the exit status belong to `dsh --profile acp`, which an ACP
+# client such as Emacs agent-shell/acp.el speaks to directly.
+#
+# stdout is a protocol socket: every byte on it must be an ACP JSON-RPC frame.
+# Diagnostics, warnings, and first-run profile initialization output go to
+# stderr. A single stray stdout line breaks the client's handshake.
+#
+# The ACP app already exits on stdin EOF (`exitOnStdinEnd` in
+# @deepseek-ai/dsh-acp-app), and run-dsh execs podman/docker, so no stdin
+# watcher and no signal relay are needed here: closing stdin shuts the server
+# down, and podman stop reaches this process (then dsh) directly.
+#
+# Patch order mirrors dsh-web-entry:
+#   1. project-workspace  — required when run-dsh exports DSH_PROJECT_HOME
+#   2. searxng-search     — optional
+#   3. dev-container      — optional
+#   4. permission         — optional
+# The project overlay redirects sessions/storages/attachments into
+# <project>/.dsh, so `session/list` cannot leak another project's sessions.
+# The dev-container and permission overlays apply the same container policy
+# and DSH_PERMISSION_MODE default as web mode.
+#
+# The acp profile is initialized into the host-mounted $DSH_HOME on first use.
+# `dsh --profile acp --help` composes the profile and exits without claiming a
+# transport; stdout is discarded so its help text cannot corrupt ACP. The
+# profile's package.json is the initialized marker.
+
+set -euo pipefail
+
+patch_args=()
+
+add_patch() {
+    if [ -f "$1" ]; then
+        patch_args+=(--patch "$1")
+    else
+        echo "dsh-acp-entry: warning: $1 missing; continuing without it" >&2
+    fi
+}
+
+# Project isolation is the reason run-dsh exports these variables. If the
+# overlay is missing, fail loudly instead of silently falling back to the
+# shared $DSH_HOME roots (which would expose every project's sessions).
+if [ -n "${DSH_PROJECT_HOME:-}" ]; then
+    if [ ! -f /usr/local/share/dsh/project-workspace.patch.yml ]; then
+        echo "dsh-acp-entry: DSH_PROJECT_HOME is set but" \
+             "/usr/local/share/dsh/project-workspace.patch.yml is missing;" \
+             "refusing to run with shared project state" >&2
+        exit 1
+    fi
+    patch_args+=(--patch /usr/local/share/dsh/project-workspace.patch.yml)
+fi
+
+add_patch /usr/local/share/dsh/searxng-search.patch.yml
+add_patch /usr/local/share/dsh/dev-container.patch.yml
+add_patch /usr/local/share/dsh/permission.patch.yml
+
+# First run: the host-mounted $DSH_HOME has no acp profile yet (the image's
+# /root/.dsh is shadowed by the mount), so boot the profile once with stdout
+# discarded. dsh's own diagnostics stay on stderr. The help path starts no
+# transport, so this cannot claim the connection agent-shell is opening.
+acp_profile="${DSH_HOME:-/root/.dsh}/profiles/acp/package.json"
+if [ ! -f "$acp_profile" ]; then
+    echo "dsh-acp-entry: initializing the acp profile under ${DSH_HOME:-/root/.dsh}" >&2
+    if ! dsh --profile acp --help >/dev/null; then
+        echo "dsh-acp-entry: failed to initialize the acp profile;" \
+             "see the dsh output above" >&2
+        exit 1
+    fi
+fi
+
+# exec: dsh becomes PID 1 and owns the stdio pipes and exit status. No URL,
+# port, --host, --no-open, or --trusted-host flags belong in ACP mode.
+exec dsh --profile acp "${patch_args[@]}" "$@"

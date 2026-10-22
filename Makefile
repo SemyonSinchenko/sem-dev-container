@@ -4,8 +4,9 @@
 #   make shared        # build the heavy shared base only
 #   make pi            # shared + pi harness (default engine: podman)
 #   make prime-agent   # shared + prime-agent harness
-#   make dsh           # shared + DeepSeek Harness (dsh web profile)
+#   make dsh           # shared + DeepSeek Harness (dsh web + acp profiles)
 #   make test-dsh      # dev-container plugin unit tests (Node 22+)
+#   make test-run-dsh  # run-dsh web/ACP dry-run contract tests (Python 3.10+)
 #   make all           # all three harnesses
 #
 # Override the engine or tags freely:
@@ -13,8 +14,8 @@
 #   make TAG_SHARED=myreg/dev-shared:1.0 TAG_PI=myreg/dev-pi:1.0 all
 #
 # All builds use the repo root as context (the shared layer COPYs
-# .m2/settings.xml, the dsh layer COPYs dsh/dsh-web-entry), so run make
-# from the repo root.
+# .m2/settings.xml, the dsh layer COPYs dsh/dsh-web-entry and
+# dsh/dsh-acp-entry), so run make from the repo root.
 
 ENGINE       ?= podman
 TAG_SHARED   ?= dev-shared
@@ -23,7 +24,7 @@ TAG_PRIME    ?= dev-prime-agent
 TAG_DSH      ?= dev-dsh
 CONTEXT      := .
 
-.PHONY: all shared pi prime-agent dsh test-dsh
+.PHONY: all shared pi prime-agent dsh test-dsh test-run-dsh
 
 all: pi prime-agent dsh
 
@@ -44,3 +45,6 @@ dsh: shared
 
 test-dsh:
 	node --test dsh/dev-container.test.mjs
+
+test-run-dsh:
+	python3 -m unittest discover -s tests -p 'test_*.py'

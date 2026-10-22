@@ -29,6 +29,15 @@ After that line run-dsh prints three host-side lines: the complete URL with
 the token (clickable), the published host port, and the token. The last two
 are raw values for monitoring scripts. See README.md.
 
+`run-dsh --acp` runs the same container (same project mount, state, caches and
+environment) as a foreground ACP stdio server instead: no port is published,
+no URL or token is printed, and stdin/stdout are inherited by
+`dsh-acp-entry` -> `dsh --profile acp`. The launcher execs podman/docker, so
+the ACP client (agent-shell/acp.el in Emacs) owns the pipes, signals, and exit
+status. stdout is protocol-only; diagnostics go to stderr. No pseudo-TTY is
+allocated even when stdin is a terminal, because terminal echo and CR/LF
+translation corrupt ACP framing.
+
 Inside the container the image-local dev-container plugin adds the runtime
 facts (disposable root container, /target, read-only .git) to the system
 prompt and denies git writes with a clear message; see dsh/dev-container.mjs.
@@ -44,6 +53,7 @@ responsibility. Override one run with
 Examples:
   run-dsh                       # start dsh web in $PWD and follow its logs
   run-dsh -- --port 1234        # flags after -- go to `dsh web` (container side)
+  run-dsh --acp                 # serve ACP over stdio instead (agent-shell/acp.el)
   run-dsh --shell               # drop into bash in the container (no server)
   run-dsh --exec dsh --help     # run an arbitrary command instead of the server
   run-dsh --engine docker       # use docker instead of podman
@@ -68,6 +78,7 @@ from pathlib import Path
 
 IMAGE = "dev-dsh"               # default image (override with --image)
 ENTRY = "dsh-web-entry"         # foreground wrapper installed by dsh/Dockerfile
+ACP_ENTRY = "dsh-acp-entry"     # foreground ACP stdio entry installed alongside it
 STATE_DIR = ".dsh"              # host $HOME/.dsh  ->  /root/.dsh (shared DSH_HOME)
 PROJECT_STATE_DIR = ".dsh"      # <project>/.dsh: sessions/storages/attachments
 AGENTS_DIR = ".agents"          # host $HOME/.agents (dsh AGENTS_HOME)
@@ -314,13 +325,19 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="run-dsh",
         description="Run the DeepSeek Harness dev container (dev-dsh) with host caches/state "
-                    "mounted, attached to the server logs (Ctrl-D/Ctrl-C stops it).",
-        epilog="Non-flag arguments are passed to the `dsh web` command (use -- to start them). "
-               "Script options must come before `--`/`--exec`: everything after is container-side.",
+                    "mounted, attached to the server logs (Ctrl-D/Ctrl-C stops it), "
+                    "or serve ACP over stdio with --acp.",
+        epilog="Non-flag arguments are passed to the container app (`dsh web`, or "
+               "`dsh --profile acp` with --acp; use -- to start them). Script options "
+               "must come before `--`/`--exec`: everything after is container-side.",
     )
     p.add_argument("--shell", action="store_true",
                    help="drop into an interactive bash shell instead of the server "
                         "(no port is published)")
+    p.add_argument("--acp", action="store_true",
+                   help="serve the ACP stdio transport instead of the web UI "
+                        "(for agent-shell/acp.el; no port is published, stdin/stdout "
+                        "belong to the ACP client)")
     p.add_argument("--exec", dest="exec_cmd", nargs=argparse.REMAINDER, metavar="CMD",
                    help="run CMD... as-is instead of the server (e.g. --exec dsh --help)")
     p.add_argument("--engine", default="auto", metavar="ENGINE",
@@ -335,8 +352,14 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true",
                    help="print the command and exit without running it")
     p.add_argument("agent_args", nargs="*", metavar="ARG",
-                   help="extra arguments forwarded to `dsh web` inside the container")
-    return p.parse_args(argv)
+                   help="extra arguments forwarded to the container app")
+    args = p.parse_args(argv)
+    # argparse cannot express mutual exclusion with --exec's REMAINDER, so
+    # reject the combination explicitly. (--acp after --exec is container-side,
+    # like every other argument there.)
+    if args.acp and (args.shell or args.exec_cmd):
+        p.error("--acp cannot be combined with --shell or --exec")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -348,7 +371,14 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_mount_sources(home, pwd)
 
-    cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
+    # ACP owns stdin/stdout: attach stdin (-i) but never allocate a TTY, even
+    # when run-dsh itself was started from a terminal. `-t` turns on terminal
+    # echo and CR/LF translation, both of which corrupt ACP JSON-RPC framing.
+    # Web mode keeps its interactive terminal when stdin is a TTY.
+    if args.acp:
+        cmd = [engine, "run", "--rm", "-i"]
+    else:
+        cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
     for spec in build_mounts(home, pwd, args.selinux):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
@@ -375,6 +405,27 @@ def main(argv: list[str] | None = None) -> int:
     # host loopback for SearXNG. Docker has no equivalent: publish SearXNG on
     # a host-reachable address and override SEARXNG_URL instead.
     podman_network = ["--network", "pasta:-T,7331"] if engine == "podman" else []
+    if args.acp:
+        # Same mounts, cwd, env and SearXNG loopback forwarding as web mode,
+        # but no published port and no --host-lo-to-ns-lo (there is no port to
+        # translate). The entrypoint owns stdout for ACP.
+        cmd += podman_network + [args.image, ACP_ENTRY] + args.agent_args
+        if args.dry_run:
+            print(" ".join(shlex.quote(c) for c in cmd))
+            return 0
+        if sys.stdin.isatty():
+            print("run-dsh: warning: --acp expects an ACP client on stdin; "
+                  "stdin is a terminal, so no handshake will arrive",
+                  file=sys.stderr, flush=True)
+        # Replace the launcher with podman/docker: stdio passes through
+        # untouched, the client's signals reach the container engine, and the
+        # container's exit status is this process's exit status. No banner,
+        # log streaming, port picking, or URL parsing is involved.
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as exc:
+            print(f"run-dsh: cannot execute {cmd[0]}: {exc}", file=sys.stderr)
+            return 127
     if args.shell:
         cmd += podman_network + [args.image, "bash"]
     elif args.exec_cmd:

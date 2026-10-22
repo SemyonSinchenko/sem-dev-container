@@ -6,8 +6,8 @@ base image carries all compilers, runtimes, and tools; each agent harness
 
 ┌────────────────────────┐   ┌──────────────────────┐   ┌───────────────────────┐
 │ pi (thin)              │   │ prime-agent (thin)   │   │ dsh (thin)            │
-│ • pi coding agent      │   │ • prime-agent CLI    │   │ • dsh web (npm) + pnpm│
-│ • openspec CLI (shared)│   │ • IPython kernel venv│   │ • RPC for dsh-emacs   │
+│ • pi coding agent      │   │ • prime-agent CLI    │   │ • dsh web + ACP (npm) │
+│ • openspec CLI (shared)│   │ • IPython kernel venv│   │ • RPC + ACP clients   │
 ├────────────────────────┴──────────────────────────┴───────────────────────────┤
 │ shared (heavy, ~everything)                                                   │
 │  Ubuntu 26.04 base                                                            │
@@ -26,7 +26,7 @@ base image carries all compilers, runtimes, and tools; each agent harness
 make shared        # podman build -f shared/Dockerfile -t dev-shared .
 make pi            # + pi agent
 make prime-agent   # + prime-agent agent
-make dsh           # + DeepSeek Harness (dsh web profile)
+make dsh           # + DeepSeek Harness (dsh web and acp profiles)
 make all           # all three
 ```
 
@@ -48,6 +48,9 @@ podman run --rm -it -v "$PWD:/work" -w /work dev-prime-agent
 # dsh — use run-dsh: it mounts caches/state and picks a free host port
 cd /path/to/project
 run-dsh
+
+# dsh as an ACP stdio server for agent-shell/acp.el (no port, no URL)
+run-dsh --acp
 ```
 
 ## Layout
@@ -59,9 +62,10 @@ run-dsh
 | `prime-agent/Dockerfile` | `FROM dev-shared` + prime-agent + its IPython kernel venv |
 | `bins/run-pi`          | run the `dev-pi` container with host caches/state mounted |
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
-| `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789 |
-| `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + the foreground wrapper |
-| `dsh/dsh-web-entry`    | container-side wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
+| `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
+| `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
+| `dsh/dsh-web-entry`    | container-side web wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
+| `dsh/dsh-acp-entry`    | container-side ACP wrapper: foreground stdio, quiet profile preflight, execs `dsh --profile acp` |
 | `dsh/project-workspace.mjs` | boot plugin: registers the project folder as the session Workspace |
 | `dsh/project-workspace.patch.yml` | overlay: points sessions/storages/attachments at `<project>/.dsh` |
 | `dsh/searxng-search.mjs` | native `web_search` provider backed by the host SearXNG instance |
@@ -70,8 +74,9 @@ run-dsh
 | `dsh/dev-container.patch.yml` | overlay: loads the dev-container policy plugin |
 | `dsh/permission.patch.yml` | overlay: maps `DSH_PERMISSION_MODE` to the default permission preset |
 | `dsh/dev-container.test.mjs` | unit tests for the policy parser and prompt text |
+| `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
-| `Makefile`             | image build targets (`make all`, `make dsh`, …) plus `make test-dsh` |
+| `Makefile`             | image build targets (`make all`, `make dsh`, …) plus `make test-dsh` / `make test-run-dsh` |
 
 ## Running: bins/run-pi, run-pa, and run-dsh
 
@@ -117,7 +122,8 @@ run-pi --dry-run             # print the podman/docker command without running
 ### DeepSeek Harness: bins/run-dsh
 
 `run-dsh` starts the dsh web profile (server + web UI) on the current
-project folder and attaches to its logs:
+project folder and attaches to its logs; `run-dsh --acp` instead serves ACP
+over stdio (see the ACP mode subsection below):
 
 ```sh
 cd /path/to/project
@@ -163,11 +169,98 @@ provider/model setup (Settings → Models); the key persists in `~/.dsh`
 across runs. Ctrl-D (stdin EOF) and Ctrl-C (SIGINT) both stop the harness
 gracefully and remove the container.
 
+#### ACP mode: `run-dsh --acp`
+
+`run-dsh --acp` starts the same `dev-dsh` container — same project mount at
+the same absolute path, same `~/.dsh`/`~/.agents`/cache mounts, working
+directory, environment, and `<project>/.dsh` isolation — but runs
+`dsh-acp-entry` → `dsh --profile acp` as a foreground
+[Agent Client Protocol](https://agentclientprotocol.com) stdio server:
+
+```sh
+cd /path/to/project
+run-dsh --acp                  # ACP on stdin/stdout: no port, URL, or token
+run-dsh --acp --dry-run        # print the podman/docker command
+run-dsh --acp --env DSH_PERMISSION_MODE=workspace-write   # per-run policy
+```
+
+The launcher `exec`s podman/docker, so the ACP client owns stdin/stdout, the
+client's signals reach the container engine, and the exit status is the
+container's. ACP mode forces `-i` and never allocates a pseudo-TTY (`-t`),
+even when started from a terminal: terminal echo and CR/LF translation corrupt
+ACP framing. It publishes no port, adds no `--trusted-host`, prints no web
+banner, and runs no log streaming or URL/port parsing. It accepts the same
+`--engine`, `--image`, `--env`, `--no-selinux`, and `--dry-run` options as web
+mode, is mutually exclusive with `--shell` and `--exec`, and forwards trailing
+arguments after `--` to `dsh --profile acp`.
+
+**stdout is a protocol socket.** Every stdout byte is ACP JSON-RPC (ndjson);
+diagnostics, warnings, and first-run profile initialization go to stderr. If
+stdin is a terminal, `run-dsh` warns on stderr and continues (dry runs do not
+warn) because a human cannot usefully type JSON-RPC there. Do not merge any
+other output into stdout.
+
+**agent-shell integration.**
+[agent-shell](https://github.com/xenodium/agent-shell) starts the command from
+the client buffer's `default-directory`, so start it from the project root:
+
+```emacs-lisp
+(setq agent-shell-deepseek-acp-command '("run-dsh" "--acp"))
+;; Optional: choose defaults at session start; the ACP profile does not
+;; inherit the web profile's provider/model settings.
+;; (setq agent-shell-deepseek-default-config-options
+;;       '(("model" . "deepseek-v4-flash")
+;;         ("reasoning_effort" . "high")))
+```
+
+Then `M-x agent-shell-deepseek-start-agent` from a buffer in the project. No
+port/token parsing and no environment injection from `acp-make-client` are
+needed: `run-dsh` owns the container environment and passes provider API keys
+through from Emacs's environment (or `~/.dsh/.credentials.yaml`). Closing the
+agent-shell buffer closes stdin; the ACP server exits and `--rm` removes the
+container.
+
+**Profiles and models.** The `acp` profile lives in `~/.dsh/profiles/acp`,
+separate from `~/.dsh/profiles/web`. Its shipped default is
+`provider: deepseek-official`, `model: deepseek-v4-flash`; model and reasoning
+effort are chosen by the client at session start. Web UI model/provider
+settings and edits to `~/.dsh/profiles/web/cordis.patch.yml` do **not**
+automatically carry over. To align them, copy the relevant model/provider rows
+(for example `llm-*` and `agent-default-model`) into
+`~/.dsh/profiles/acp/cordis.patch.yml`, or set defaults through
+`agent-shell-deepseek-default-config-options`.
+
+**Isolation and lifecycle.** `dsh-acp-entry` loads the same overlays as the
+web entry in the same order: `project-workspace.patch.yml` (required when
+`DSH_PROJECT_HOME` is set), then `searxng-search`, `dev-container`, and
+`permission`. Sessions, storages, and attachments therefore stay in
+`<project>/.dsh`, and `session/list` does not show another project's sessions.
+The dev-container prompt policy, git-write guard, and
+`DSH_PERMISSION_MODE` default (`danger-full-access` unless overridden) match
+web mode. SearXNG forwarding is identical under podman (`pasta:-T,7331` plus
+`SEARXNG_URL`); ACP adds no published port or `--host-lo-to-ns-lo`. Each
+invocation is one ephemeral container; the first run initializes
+`~/.dsh/profiles/acp` with its output kept off stdout. ACP sessions take their
+cwd from the client rather than from the Web UI Workspace registry, so the
+`project-workspace` insert can stay pending in this composition (dsh reports
+it on stderr); the overlay's persistence/storage/attachment redirects still
+apply to `<project>/.dsh`.
+
+Closing the client closes stdin, which is the normal shutdown path. SIGTERM
+(what `acp.el` sends first to the process group) reaches podman/docker and
+stops the `--rm` container. An uncatchable SIGKILL can leave the container
+running after its engine client dies; remove it with
+`podman ps` / `podman rm -f` (or the docker equivalents).
+
+Only one dsh mode per project at a time is supported: web and ACP write the
+same `<project>/.dsh` store. Do not run both against one project concurrently.
+The dry-run command shape is covered by `make test-run-dsh`.
+
 #### Container policy: runtime context and git guard
 
-The image's `dsh-web-entry` loads `dsh/dev-container.patch.yml`
-unconditionally. Its plugin (`dsh/dev-container.mjs`) adds a runtime-context
-snapshot to every session, alongside DSH's own sandbox/approval facts:
+Both entrypoints load `dsh/dev-container.patch.yml` unconditionally. Its
+plugin (`dsh/dev-container.mjs`) adds a runtime-context snapshot to every
+session, alongside DSH's own sandbox/approval facts:
 
 - the access policy: the container is a disposable isolation boundary, so the
   agent acts freely and never asks for permission (DSH's file sandbox is off
@@ -292,7 +385,7 @@ Add `.dsh/` to the project's `.gitignore` (this repository already does).
 DSH's project-data roots are redirected there by
 `dsh/project-workspace.patch.yml`; `bins/run-dsh` exports the paths as
 `DSH_PROJECT_DIR` / `DSH_PROJECT_HOME` / `DSH_PROJECT_SESSIONS` /
-`DSH_PROJECT_STORAGES`, and `dsh-web-entry` loads the overlay. The
+`DSH_PROJECT_STORAGES`, and both entrypoints load the overlay. The
 `project-workspace` plugin registers `$PWD` as the one session Workspace at
 boot, so the first blank session starts in the project instead of DSH's
 first-use `default-workspace`.
@@ -392,14 +485,16 @@ a host-reachable address in the quadlet (`PublishPort=`) and run with
 - Bind-mount host caches onto `/cache/*` to share downloads across runs
   (see `shared/Dockerfile` step 7b for the full list).
 - dsh containers share the host `~/.dsh` for **config only**: profiles,
-  installed plugins, model/provider settings and provider keys. The web
-  profile initializes on first use into that directory — the first
-  `run-dsh` on a machine runs pnpm once (the image installs pnpm 11 for it;
-  the dsh npm package resolves pnpm from PATH), later runs start instantly.
+  installed plugins, model/provider settings and provider keys. The web and
+  acp profiles initialize on first use into that directory — the first
+  web-mode `run-dsh` on a machine runs pnpm once (the image installs pnpm 11
+  for it; the dsh npm package resolves pnpm from PATH), later runs start
+  instantly; the acp profile has no external dependencies to install.
   Project data (sessions, Workspace registry, attachments) lives in
   `<project>/.dsh`; parallel `run-dsh` containers in different project
-  folders are isolated. Two servers on the *same* project share one `.dsh`
-  and are not a supported shape. dsh rejects wildcard bind addresses by
-  design, so `dsh/dsh-web-entry` binds the container's own IP and `run-dsh`
-  publishes the port on `127.0.0.1` only — dsh-emacs and the browser are
-  expected on the same machine.
+  folders are isolated. Web and ACP against the *same* project share one
+  `.dsh` store and are not a supported shape. dsh rejects wildcard bind
+  addresses by design, so web mode's `dsh/dsh-web-entry` binds the container's
+  own IP and `run-dsh` publishes the port on `127.0.0.1` only — dsh-emacs and
+  the browser are expected on the same machine. ACP mode publishes nothing;
+  its client speaks over stdin/stdout.
