@@ -1,0 +1,26 @@
+# Project-local DSH data. Loaded by dsh-web-entry only when bins/run-dsh
+# exports DSH_PROJECT_HOME (see bins/run-dsh). It keeps sessions, the
+# Workspace registry, projection caches, and attachment objects inside
+# <project>/.dsh while ~/.dsh remains the shared config home (profiles,
+# credentials, global instructions/skills).
+
+- id: session-persistence-jsonl
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_PROJECT_SESSIONS
+
+- id: storage-json
+  name: '@deepseek-ai/dsh-storage-json'
+  config:
+    root: !!js process.env.DSH_PROJECT_STORAGES
+
+- id: attachment-local
+  name: '@deepseek-ai/dsh-attachment-local'
+  config:
+    dshHome: !!js process.env.DSH_PROJECT_HOME
+
+# Runs after workspaceRegistry initializes and registers $PWD as the
+# project's one Workspace (with its basename as the display title).
+- insert:
+    - id: project-workspace
+      name: '/usr/local/share/dsh/project-workspace.mjs'

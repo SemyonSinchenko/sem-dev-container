@@ -5,6 +5,7 @@
 #   make pi            # shared + pi harness (default engine: podman)
 #   make prime-agent   # shared + prime-agent harness
 #   make dsh           # shared + DeepSeek Harness (dsh web profile)
+#   make test-dsh      # dev-container plugin unit tests (Node 22+)
 #   make all           # all three harnesses
 #
 # Override the engine or tags freely:
@@ -22,7 +23,7 @@ TAG_PRIME    ?= dev-prime-agent
 TAG_DSH      ?= dev-dsh
 CONTEXT      := .
 
-.PHONY: all shared pi prime-agent dsh
+.PHONY: all shared pi prime-agent dsh test-dsh
 
 all: pi prime-agent dsh
 
@@ -40,3 +41,6 @@ prime-agent: shared
 dsh: shared
 	$(ENGINE) build -f dsh/Dockerfile -t $(TAG_DSH) \
 		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)
+
+test-dsh:
+	node --test dsh/dev-container.test.mjs

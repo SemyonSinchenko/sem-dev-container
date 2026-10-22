@@ -1,0 +1,35 @@
+# Permission policy for the run-dsh container (image-local deployment policy).
+# Loaded by dsh-web-entry after the profile layer, so it wins over the shared
+# ~/.dsh profile's own permission.defaultPreset.
+#
+# bins/run-dsh exports DSH_PERMISSION_MODE (default danger-full-access); this
+# row turns that one value into the default permission preset, so a new session
+# starts from the matching sandbox + approval pair. The base profile already
+# maps the same env value to sandbox-policy.mode and approval.policy, keeping
+# the deployment defaults and the pinned preset consistent.
+#
+# DSH has no separate "allow dangerous actions" switch: a permission preset IS
+# the switch (sandbox mode + approval policy). Per-session overrides — the Web
+# UI selector or the /permission command — still win, because they append
+# session events after the initial pin. A later --patch overlay or an explicit
+# defaultPreset in the profile can also replace this policy.
+#
+# `presets` is restated because a patch replaces a row's whole config; these
+# are the shipped values, not container-specific ones. A consequence is that
+# custom presets added to the shared ~/.dsh profile do not reach the
+# container; the Web UI / `/permission` still expose these three.
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: !!js process.env.DSH_PERMISSION_MODE ?? 'danger-full-access'

@@ -19,6 +19,13 @@
 # (override: DSH_PORT).
 #
 # Extra flags after these are forwarded to `dsh web` (see run-dsh --).
+#
+# When bins/run-dsh exports DSH_PROJECT_HOME, load the project-workspace
+# overlay: it points session persistence, storage, and attachments at
+# <project>/.dsh and registers that folder as the session workspace. ~/.dsh
+# stays the shared config home (profiles, credentials, global instructions).
+# The searxng-search overlay is always loaded; it routes the native
+# web_search tool through the host's SearXNG instance.
 
 set -u
 
@@ -29,7 +36,27 @@ set -u
 # that implicit assignment; fd 3 is inherited by the subshell.
 exec 3<&0
 
-dsh web --host 127.0.0.1 --port "${DSH_PORT:-3080}" --no-open "$@" &
+profile="${DSH_PROFILE:-web}"
+patch_args=()
+add_patch() {
+    if [ -f "$1" ]; then
+        patch_args+=(--patch "$1")
+    else
+        echo "dsh-web-entry: warning: $1 missing; continuing without it" >&2
+    fi
+}
+if [ -n "${DSH_PROJECT_HOME:-}" ]; then
+    add_patch /usr/local/share/dsh/project-workspace.patch.yml
+fi
+add_patch /usr/local/share/dsh/searxng-search.patch.yml
+# Image-local deployment policy: container runtime context + git-write guard,
+# and the permission default derived from DSH_PERMISSION_MODE.
+add_patch /usr/local/share/dsh/dev-container.patch.yml
+add_patch /usr/local/share/dsh/permission.patch.yml
+
+# --patch is a launcher flag: it must come before the app's own flags.
+dsh --profile "$profile" "${patch_args[@]}" \
+    --host 127.0.0.1 --port "${DSH_PORT:-3080}" --no-open "$@" &
 pid=$!
 
 # stdin watcher: read the attached terminal until EOF (Ctrl-D), then stop the

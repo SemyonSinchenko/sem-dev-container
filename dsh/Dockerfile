@@ -45,11 +45,46 @@ RUN npm install -g --no-fund --no-audit --loglevel=warn --progress=false pnpm@11
 COPY dsh/dsh-web-entry /usr/local/bin/dsh-web-entry
 RUN chmod 0755 /usr/local/bin/dsh-web-entry
 
-# Harness state lives under $DSH_HOME (default ~/.dsh, spelled out so the
-# bins/run-dsh mount target is visible in the image): profiles, out-of-tree
-# plugins, settings including provider API keys, and sessions. bins/run-dsh
-# bind-mounts the host's ~/.dsh here, so configuration and the first-run
-# profile initialization survive container teardown.
+# Project-local DSH data lives in <project>/.dsh (sessions, workspace
+# registry, attachments); the entry loads that overlay only when bins/run-dsh
+# exports DSH_PROJECT_HOME. The plugin registers the project folder as the
+# session Workspace before the browser connects, so DSH never falls back to
+# its first-use Workspace under <Documents>/deepseek-harness.
+#
+# The searxng-search overlay is always loaded: it registers a native
+# web_search provider backed by the host's SearXNG instance and selects it in
+# the `web` service, so DSH's web_search tool works without an API key.
+#
+# The dev-container overlay is always loaded too: it adds the container's
+# runtime context (root, disposable OS, CARGO_TARGET_DIR=/target, read-only
+# .git) to the system prompt, states the unrestricted access policy, and
+# installs the git-write guard. It is an image-local deployment policy, not
+# project configuration; bins/run-dsh exports DSH_GIT_READ_ONLY when it
+# applies the read-only .git mount and DSH_PERMISSION_MODE=danger-full-access
+# so sessions start with the file sandbox and approvals off.
+# The permission overlay maps DSH_PERMISSION_MODE to the default permission
+# preset, so the launcher's value (danger-full-access unless overridden) wins
+# over the shared profile's own defaultPreset for new sessions.
+RUN install -d /usr/local/share/dsh
+COPY dsh/project-workspace.mjs dsh/project-workspace.patch.yml \
+     dsh/searxng-search.mjs dsh/searxng-search.patch.yml \
+     dsh/dev-container.mjs dsh/dev-container.patch.yml \
+     dsh/permission.patch.yml /usr/local/share/dsh/
+RUN chmod 0444 /usr/local/share/dsh/project-workspace.mjs \
+              /usr/local/share/dsh/project-workspace.patch.yml \
+              /usr/local/share/dsh/searxng-search.mjs \
+              /usr/local/share/dsh/searxng-search.patch.yml \
+              /usr/local/share/dsh/dev-container.mjs \
+              /usr/local/share/dsh/dev-container.patch.yml \
+              /usr/local/share/dsh/permission.patch.yml
+
+# Shared harness config lives under $DSH_HOME (default ~/.dsh, spelled out so
+# the bins/run-dsh mount target is visible in the image): profiles, out-of-tree
+# plugins, settings including provider API keys, and global instructions.
+# bins/run-dsh bind-mounts the host's ~/.dsh here so configuration and the
+# first-run profile initialization survive container teardown. Project data
+# (sessions, Workspace registry, attachments) is redirected to <project>/.dsh
+# by the overlay above; it never lands in this shared home.
 ENV DSH_HOME=/root/.dsh
 
 WORKDIR /work

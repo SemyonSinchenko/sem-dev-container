@@ -9,7 +9,15 @@ an RPC surface used by clients such as dsh-emacs
 its own address on the container-side port 3080; run-dsh publishes it on
 the host at 127.0.0.1:<port>, picking a free port from the rare range
 30780-30789 so up to 10 sessions can run in parallel (one project folder
-per container; the harness state in ~/.dsh is shared).
+per container).
+
+Project data is kept in <project>/.dsh (sessions, workspace registry and
+attachments); ~/.dsh is mounted at /root/.dsh only for shared, project-
+agnostic state (profiles, plugins, provider credentials, global
+instructions and skills). The launcher exports DSH_PROJECT_* variables and
+the container entry applies a patch that points DSH's project-data roots at
+<project>/.dsh, so the harness starts with the project as its one
+workspace. Add .dsh/ to the project's .gitignore.
 
 The launcher is foreground by design: it streams the server logs, and
 Ctrl-D (stdin EOF) or Ctrl-C (SIGINT) stops the harness and removes the
@@ -17,12 +25,21 @@ container. The server prints its URL with the launch token, e.g.
 
     dsh web: http://127.0.0.1:3080/?token=...
 
-That address is container-side (dsh >= 0.2.0 has no --public-url to
-advertise the mapping): open the 127.0.0.1:<port> URL this launcher
-prints first, carrying the token from the dsh web line below. Paste it
-into dsh-emacs (dsh-emacs-base-url) or set its token
-(dsh-emacs-server-auth-token); see README.md. The same URL opens the Web
-UI in a host browser for model/provider setup. The token changes per run.
+After that line run-dsh prints three host-side lines: the complete URL with
+the token (clickable), the published host port, and the token. The last two
+are raw values for monitoring scripts. See README.md.
+
+Inside the container the image-local dev-container plugin adds the runtime
+facts (disposable root container, /target, read-only .git) to the system
+prompt and denies git writes with a clear message; see dsh/dev-container.mjs.
+
+Sessions start unrestricted: the launcher exports
+DSH_PERMISSION_MODE=danger-full-access, which turns DSH's file sandbox off
+and its approval policy to `never`, so the agent never has to ask for
+permission inside this disposable container. Isolation is the operator's
+responsibility. Override one run with
+`--env DSH_PERMISSION_MODE=workspace-write` (or switch the session's
+`/permission` preset in the Web UI); see README.md.
 
 Examples:
   run-dsh                       # start dsh web in $PWD and follow its logs
@@ -40,16 +57,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 
 IMAGE = "dev-dsh"               # default image (override with --image)
 ENTRY = "dsh-web-entry"         # foreground wrapper installed by dsh/Dockerfile
-STATE_DIR = ".dsh"              # host $HOME/.dsh  ->  /root/.dsh (DSH_HOME)
+STATE_DIR = ".dsh"              # host $HOME/.dsh  ->  /root/.dsh (shared DSH_HOME)
+PROJECT_STATE_DIR = ".dsh"      # <project>/.dsh: sessions/storages/attachments
 AGENTS_DIR = ".agents"          # host $HOME/.agents (dsh AGENTS_HOME)
 CONTAINER_PORT = 3080           # dsh web port inside the container (fixed)
 HOST_BIND = "127.0.0.1"         # host-side publish address; must stay loopback:
@@ -62,6 +82,15 @@ HOST_BIND = "127.0.0.1"         # host-side publish address; must stay loopback:
 PORT_BASE = 30780               # rare host port range for parallel sessions:
 PORT_COUNT = 10                 # 30780-30789, below the ephemeral range.
 VOLUME_PREFIX = "dsh-target"    # named volume per project: dsh-target<escaped pwd> -> /target
+
+# DSH permission policy: the sandbox mode every session starts in. The shipped
+# base profile maps danger-full-access to approval=never; any other mode asks.
+DEFAULT_PERMISSION_MODE = "danger-full-access"
+
+# `dsh web` prints its container-side launch URL, e.g.
+#   dsh web: http://127.0.0.1:3080/?token=...
+# The token is per run; the host port differs (run-dsh publishes it).
+DSH_WEB_URL_RE = re.compile(r"dsh web:\s+(?P<url>https?://\S+)")
 
 # Env vars copied into the container when set on the host (`-e KEY` passes
 # the host value through; unset keys are skipped). Same list as run-pi/run-pa;
@@ -93,6 +122,7 @@ def ensure_mount_sources(home: Path, pwd: Path) -> None:
     """Create host dirs that will be bind-mounted (podman refuses to create them)."""
     dirs = [
         pwd,
+        pwd / PROJECT_STATE_DIR,
         home / STATE_DIR,
         home / AGENTS_DIR,
         home / ".cargo/registry",
@@ -105,6 +135,11 @@ def ensure_mount_sources(home: Path, pwd: Path) -> None:
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+
+def has_git_dir(pwd: Path) -> bool:
+    """Whether the project has a .git to re-mount read-only (and report)."""
+    return (pwd / ".git").exists()
 
 
 def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
@@ -126,10 +161,10 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     # entry wins): the agent can read history and diffs, but every git write
     # (commit, push, stash, checkout, rebase) fails inside the container --
     # commits belong on the host, signed with the operator's key (see
-    # APPEND_SYSTEM.md). Skipped for non-git projects: podman would create
-    # a stray .git/ dir in them.
+    # dsh/dev-container.mjs). Skipped for non-git projects: podman would
+    # create a stray .git/ dir in them.
     git_dir = pwd / ".git"
-    if git_dir.exists():
+    if has_git_dir(pwd):
         specs.append(f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}")
     # Named (docker-managed) volume, one per host project dir, so builds the
     # dsh agent runs in the workspace keep their target dir across runs.
@@ -146,6 +181,12 @@ def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
     """
     envs: dict[str, str] = {
         "CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target",
+        # The container is a single-purpose isolation boundary, so DSH starts
+        # every session with its file sandbox off. The base profile derives
+        # approval=never from this exact value, which also removes the
+        # fail-closed approval path for sandbox escalations. A later
+        # --env DSH_PERMISSION_MODE=... in `extra` replaces this default.
+        "DSH_PERMISSION_MODE": f"DSH_PERMISSION_MODE={DEFAULT_PERMISSION_MODE}",
     }
     if forward_searxng:
         envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
@@ -155,6 +196,22 @@ def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
     for spec in extra:
         envs[spec.split("=", 1)[0]] = spec
     return list(envs.values())
+
+
+def permission_mode(extra: list[str]) -> str:
+    """Effective DSH sandbox mode: the last --env DSH_PERMISSION_MODE wins.
+
+    Mirrors build_envs' last-one-wins order (including a bare KEY, which passes
+    the host value through) so the startup banner reports the real policy.
+    """
+    for spec in reversed(extra):
+        key, sep, value = spec.partition("=")
+        if key != "DSH_PERMISSION_MODE":
+            continue
+        if sep:
+            return value
+        return os.environ.get(key) or DEFAULT_PERMISSION_MODE
+    return DEFAULT_PERMISSION_MODE
 
 
 def pick_free_port() -> int:
@@ -170,6 +227,87 @@ def pick_free_port() -> int:
         f"error: host ports {PORT_BASE}-{PORT_BASE + PORT_COUNT - 1} are all busy; "
         "stop an old run-dsh session or raise PORT_COUNT"
     )
+
+
+def host_link(port: int, token: str) -> str:
+    """Host-side URL for the printed container launch URL."""
+    return f"http://{HOST_BIND}:{port}/?token={urllib.parse.quote(token, safe='')}"
+
+
+def write_out(text: str) -> None:
+    """Write one line, starting it in column 0 when stdout is a terminal.
+
+    `podman run -it`/`docker run -it` put the attached terminal in raw mode,
+    which clears OPOST/ONLCR: a bare LF moves down but no longer returns to
+    column 0. Every line would then begin where the previous one ended (the
+    staircase in the startup banner). Prefix the write with CR so each line
+    starts at column 0. When stdout is a pipe or file (monitoring scripts
+    capturing the raw URL/port/token) nothing is added.
+    """
+    if sys.stdout.isatty():
+        text = "\r" + text
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def emit_host_link(port: int, line: str) -> bool:
+    """Print the host URL, port, and token once, after dsh prints its URL line."""
+    match = DSH_WEB_URL_RE.search(line)
+    if match is None:
+        return False
+    parsed = urllib.parse.urlparse(match.group("url"))
+    token = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+    if not token:
+        return False
+    write_out(host_link(port, token) + "\n")
+    write_out(f"{port}\n")
+    write_out(token + "\n")
+    return True
+
+
+def run_streaming(cmd: list[str], port: int) -> int:
+    """Stream the server logs, appending the host-ready link/port/token once."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    stdout = proc.stdout
+    emitted = False
+
+    def consume(echo: bool) -> None:
+        nonlocal emitted
+        for line in stdout:
+            if echo:
+                try:
+                    write_out(line)
+                except BrokenPipeError:
+                    pass
+            if not emitted:
+                try:
+                    emitted = emit_host_link(port, line)
+                except BrokenPipeError:
+                    pass
+
+    try:
+        consume(echo=True)
+    except KeyboardInterrupt:
+        # Ctrl-C is handled by the container entry. Keep draining so podman
+        # can finish its graceful shutdown without blocking on a full pipe.
+        try:
+            consume(echo=False)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+    finally:
+        stdout.close()
+    try:
+        return proc.wait()
+    except KeyboardInterrupt:
+        return proc.wait()
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -205,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     home = Path.home()
     pwd = Path.cwd()
+    project_state = pwd / PROJECT_STATE_DIR
     engine = resolve_engine(args.engine)
 
     ensure_mount_sources(home, pwd)
@@ -213,7 +352,22 @@ def main(argv: list[str] | None = None) -> int:
     for spec in build_mounts(home, pwd, args.selinux):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
-    for env in build_envs(args.env, forward_searxng=engine == "podman"):
+    # Project-local DSH data; the container entry uses these to apply the
+    # project-workspace patch. They are defaults: a later --env wins.
+    # DSH_DEV_CONTAINER marks a run-dsh launch (visible to the agent's
+    # shell); DSH_GIT_READ_ONLY mirrors the read-only .git mount that
+    # build_mounts adds, so the prompt describes the actual layout.
+    project_envs = [
+        f"DSH_PROJECT_DIR={pwd}",
+        f"DSH_PROJECT_HOME={project_state}",
+        f"DSH_PROJECT_SESSIONS={project_state / 'sessions'}",
+        f"DSH_PROJECT_STORAGES={project_state / 'storages'}",
+        "DSH_DEV_CONTAINER=1",
+    ]
+    if has_git_dir(pwd):
+        project_envs.append("DSH_GIT_READ_ONLY=1")
+    for env in build_envs(project_envs + args.env,
+                          forward_searxng=engine == "podman"):
         cmd += ["-e", env]
 
     port: int | None = None
@@ -249,11 +403,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if port is not None:
-        print(f"dsh web (host): http://{HOST_BIND}:{port} — open it with /?token=… from the "
-              "dsh web line below (dsh-emacs / browser)")
+        mode = permission_mode(args.env)
+        approval = "never" if mode == "danger-full-access" else "ask"
+        print(f"dsh web (host): http://{HOST_BIND}:{port} — full URL with token below")
         print(f"workspace:      {pwd}")
+        print(f"dsh state:      {project_state}")
+        print(f"permissions:    {mode} (approval {approval})")
         print("stop:           Ctrl-D or Ctrl-C")
-    rc = subprocess.run(cmd).returncode
+    if port is None:
+        rc = subprocess.run(cmd).returncode
+    else:
+        rc = run_streaming(cmd, port)
     if rc != 0:
         print(f"run-dsh: container exited with code {rc} — retry with "
               "`run-dsh --exec <cmd>` to see the error", file=sys.stderr)

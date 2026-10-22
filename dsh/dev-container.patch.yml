@@ -1,0 +1,8 @@
+# Dev-container deployment policy for run-dsh. Loaded by dsh-web-entry for
+# every image-local dsh web session: registers the runtime-context snapshot
+# (mounts, root access, CARGO_TARGET_DIR, read-only .git) and the git-write
+# guard. See dev-container.mjs and README.md.
+
+- insert:
+    - id: dev-container
+      name: '/usr/local/share/dsh/dev-container.mjs'
