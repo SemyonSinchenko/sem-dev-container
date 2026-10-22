@@ -44,7 +44,7 @@ dsh: shared
 		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)
 
 test-dsh:
-	node --test dsh/dev-container.test.mjs
+	node --test dsh/dev-container.test.mjs dsh/acp-commands.test.mjs
 
 test-run-dsh:
 	python3 -m unittest discover -s tests -p 'test_*.py'

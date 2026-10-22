@@ -92,18 +92,26 @@ RUN chmod 0755 /usr/local/bin/dsh-acp-entry
 # The permission overlay maps DSH_PERMISSION_MODE to the default permission
 # preset, so the launcher's value (danger-full-access unless overridden) wins
 # over the shared profile's own defaultPreset for new sessions.
+#
+# The acp-commands overlay is ACP-only: it wraps @deepseek-ai/dsh-acp's
+# transport so agent-shell sees the user-invocable skills and the host slash
+# commands, and so `/compact`, `/goal`, etc. run in the host registry instead
+# of being sent to the model. It is loaded by dsh-acp-entry, not the web entry.
 RUN install -d /usr/local/share/dsh
 COPY dsh/project-workspace.mjs dsh/project-workspace.patch.yml \
      dsh/searxng-search.mjs dsh/searxng-search.patch.yml \
      dsh/dev-container.mjs dsh/dev-container.patch.yml \
-     dsh/permission.patch.yml /usr/local/share/dsh/
+     dsh/permission.patch.yml \
+     dsh/acp-commands.mjs dsh/acp-commands.patch.yml /usr/local/share/dsh/
 RUN chmod 0444 /usr/local/share/dsh/project-workspace.mjs \
               /usr/local/share/dsh/project-workspace.patch.yml \
               /usr/local/share/dsh/searxng-search.mjs \
               /usr/local/share/dsh/searxng-search.patch.yml \
               /usr/local/share/dsh/dev-container.mjs \
               /usr/local/share/dsh/dev-container.patch.yml \
-              /usr/local/share/dsh/permission.patch.yml
+              /usr/local/share/dsh/permission.patch.yml \
+              /usr/local/share/dsh/acp-commands.mjs \
+              /usr/local/share/dsh/acp-commands.patch.yml
 
 # Shared harness config lives under $DSH_HOME (default ~/.dsh, spelled out so
 # the bins/run-dsh mount target is visible in the image): profiles, out-of-tree

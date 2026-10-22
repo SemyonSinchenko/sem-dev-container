@@ -73,7 +73,10 @@ run-dsh --acp
 | `dsh/dev-container.mjs` | image-local policy plugin: container runtime context, access policy + git-write guard |
 | `dsh/dev-container.patch.yml` | overlay: loads the dev-container policy plugin |
 | `dsh/permission.patch.yml` | overlay: maps `DSH_PERMISSION_MODE` to the default permission preset |
+| `dsh/acp-commands.mjs` | ACP tap: advertises user-invocable skills and host slash commands, executes host commands locally |
+| `dsh/acp-commands.patch.yml` | overlay: replaces the stock `acp` row with the command-advertising tap |
 | `dsh/dev-container.test.mjs` | unit tests for the policy parser and prompt text |
+| `dsh/acp-commands.test.mjs` | unit tests for the ACP tap plus an upstream `dsh-acp` stream canary |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
 | `Makefile`             | image build targets (`make all`, `make dsh`, …) plus `make test-dsh` / `make test-run-dsh` |
@@ -220,6 +223,15 @@ through from Emacs's environment (or `~/.dsh/.credentials.yaml`). Closing the
 agent-shell buffer closes stdin; the ACP server exits and `--rm` removes the
 container.
 
+**Slash commands.** The image-local `acp-commands` overlay advertises the
+user-invocable DSH skills and the host slash commands (`/compact`, `/goal`,
+`/plan`, `/permission`, `/feedback`) through ACP, so agent-shell's
+“Available /commands” menu is populated. Skills work exactly as typed text:
+DSH injects the skill body before the model call. Host commands are executed
+by the host registry and never reach the model. `/session` is not advertised:
+ACP session switching is client-owned, so use `M-x agent-shell-resume-session`
+or the session picker when starting a shell.
+
 **Profiles and models.** The `acp` profile lives in `~/.dsh/profiles/acp`,
 separate from `~/.dsh/profiles/web`. Its shipped default is
 `provider: deepseek-official`, `model: deepseek-v4-flash`; model and reasoning
@@ -228,13 +240,18 @@ settings and edits to `~/.dsh/profiles/web/cordis.patch.yml` do **not**
 automatically carry over. To align them, copy the relevant model/provider rows
 (for example `llm-*` and `agent-default-model`) into
 `~/.dsh/profiles/acp/cordis.patch.yml`, or set defaults through
-`agent-shell-deepseek-default-config-options`.
+`agent-shell-deepseek-default-config-options`. The command overlay disables
+the stock `acp` row and re-inserts the bridge as `id: acp-commands`; its
+initial `provider`/`model` are image-owned. Override those two defaults with
+`run-dsh --acp --env DSH_ACP_PROVIDER=... --env DSH_ACP_MODEL=...`, or choose
+a route per session through the client's config options.
 
 **Isolation and lifecycle.** `dsh-acp-entry` loads the same overlays as the
 web entry in the same order: `project-workspace.patch.yml` (required when
-`DSH_PROJECT_HOME` is set), then `searxng-search`, `dev-container`, and
-`permission`. Sessions, storages, and attachments therefore stay in
-`<project>/.dsh`, and `session/list` does not show another project's sessions.
+`DSH_PROJECT_HOME` is set), then `searxng-search`, `dev-container`,
+`permission`, and `acp-commands`. Sessions, storages, and attachments therefore
+stay in `<project>/.dsh`, and `session/list` does not show another project's
+sessions.
 The dev-container prompt policy, git-write guard, and
 `DSH_PERMISSION_MODE` default (`danger-full-access` unless overridden) match
 web mode. SearXNG forwarding is identical under podman (`pasta:-T,7331` plus

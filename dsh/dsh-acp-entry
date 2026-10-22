@@ -15,15 +15,17 @@
 # watcher and no signal relay are needed here: closing stdin shuts the server
 # down, and podman stop reaches this process (then dsh) directly.
 #
-# Patch order mirrors dsh-web-entry:
+# Patch order: 1-4 mirror dsh-web-entry; 5 is ACP-only.
 #   1. project-workspace  — required when run-dsh exports DSH_PROJECT_HOME
 #   2. searxng-search     — optional
 #   3. dev-container      — optional
 #   4. permission         — optional
+#   5. acp-commands       — optional (skills/host commands over ACP)
 # The project overlay redirects sessions/storages/attachments into
 # <project>/.dsh, so `session/list` cannot leak another project's sessions.
 # The dev-container and permission overlays apply the same container policy
-# and DSH_PERMISSION_MODE default as web mode.
+# and DSH_PERMISSION_MODE default as web mode. The acp-commands overlay
+# replaces the stock acp row with the command-advertising tap.
 #
 # The acp profile is initialized into the host-mounted $DSH_HOME on first use.
 # `dsh --profile acp --help` composes the profile and exits without claiming a
@@ -58,6 +60,7 @@ fi
 add_patch /usr/local/share/dsh/searxng-search.patch.yml
 add_patch /usr/local/share/dsh/dev-container.patch.yml
 add_patch /usr/local/share/dsh/permission.patch.yml
+add_patch /usr/local/share/dsh/acp-commands.patch.yml
 
 # First run: the host-mounted $DSH_HOME has no acp profile yet (the image's
 # /root/.dsh is shadowed by the mount), so boot the profile once with stdout

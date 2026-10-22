@@ -1,0 +1,24 @@
+# Expose DSH skills and host slash commands to ACP clients.
+#
+# The stock @deepseek-ai/dsh-acp bridge never sends the standard
+# `available_commands_update` notification and never calls `ctx.commands`, so
+# agent-shell's "/" menu stays empty. This overlay disables that row and
+# mounts acp-commands.mjs, which wraps dsh-acp's `config.stream` transport and
+# adds the advertisement plus local host-command execution.
+#
+# A patch cannot rename an existing row: applyEntryPatches treats `name` as
+# the expected name and skips a mismatch. Disable + insert is the supported
+# overlay route. The config is restated because the inserted row does not
+# inherit the disabled row's config. The two env fallbacks let the launcher
+# mirror a different provider/model without editing this file:
+#   run-dsh --acp --env DSH_ACP_MODEL=...
+- id: acp
+  disabled: true
+
+- insert:
+    - id: acp-commands
+      name: '/usr/local/share/dsh/acp-commands.mjs'
+      inject: [acpAppStartup]
+      config:
+        provider: !!js process.env.DSH_ACP_PROVIDER ?? 'deepseek-official'
+        model: !!js process.env.DSH_ACP_MODEL ?? 'deepseek-v4-flash'
