@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# claude-dev-entry — image ENTRYPOINT of the dev-claude container.
+#
+# Renders /etc/claude-code/managed-settings.json (the image-local container
+# policy) from the template, then execs its arguments: `claude` (TUI),
+# `claude-acp-entry` (ACP), `bash` (--shell), or any --exec command.
+#
+# CLAUDE_PERMISSION_MODE picks the initial permission mode of every session;
+# bins/run-claude exports bypassPermissions (the container is the isolation
+# boundary) and `--env CLAUDE_PERMISSION_MODE=default` overrides one run.
+# Managed settings win over the shared ~/.claude/settings.json, so the
+# launcher's value is what new sessions start in; switching modes inside a
+# session still works.
+#
+# Never write to stdout: this script also fronts the ACP stdio server, where
+# every stdout byte must be an ACP JSON-RPC frame.
+
+set -euo pipefail
+
+template=/usr/local/share/claude/managed-settings.template.json
+target=/etc/claude-code/managed-settings.json
+
+mode="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+case "$mode" in
+    default|acceptEdits|plan|auto|dontAsk|bypassPermissions) ;;
+    *)
+        echo "claude-dev-entry: warning: unknown CLAUDE_PERMISSION_MODE=$mode;" \
+             "using default" >&2
+        mode=default
+        ;;
+esac
+
+if [ -f "$template" ]; then
+    sed "s/__PERMISSION_MODE__/$mode/" "$template" >"$target"
+else
+    echo "claude-dev-entry: warning: $template missing; continuing without" \
+         "the container policy" >&2
+fi
+
+exec "$@"

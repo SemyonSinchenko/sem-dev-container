@@ -2,23 +2,23 @@
 
 Layered dev containers for agentic development. A single heavy **shared**
 base image carries all compilers, runtimes, and tools; each agent harness
-(pi, prime-agent, dsh) is a thin layer on top.
+(pi, prime-agent, dsh, claude) is a thin layer on top.
 
-┌────────────────────────┐   ┌──────────────────────┐   ┌───────────────────────┐
-│ pi (thin)              │   │ prime-agent (thin)   │   │ dsh (thin)            │
-│ • pi coding agent      │   │ • prime-agent CLI    │   │ • dsh web + ACP (npm) │
-│ • openspec CLI (shared)│   │ • IPython kernel venv│   │ • RPC + ACP clients   │
-├────────────────────────┴──────────────────────────┴───────────────────────────┤
-│ shared (heavy, ~everything)                                                   │
-│  Ubuntu 26.04 base                                                            │
-│  • build-essential, cmake, protoc, gdb (built from source)                    │
-│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                │
-│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI      │
-│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                │
-│  • Go + open-spdd, hardwood-cli (Parquet)                                     │
-│  • emacs-nox (30.x) + gnuplot; fd/rg preinstalled so agents reuse them        │
-│  • shared caches under /cache for host bind-mounts                            │
-└───────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────┐ ┌──────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
+│ pi (thin)              │ │ prime-agent (thin)   │ │ dsh (thin)            │ │ claude (thin)       │
+│ • pi coding agent      │ │ • prime-agent CLI    │ │ • dsh web + ACP (npm) │ │ • claude CLI (npm)  │
+│ • openspec CLI (shared)│ │ • IPython kernel venv│ │ • RPC + ACP clients   │ │ • claude-agent-acp  │
+├────────────────────────┴─┴──────────────────────┴─┴───────────────────────┴─┴─────────────────────┤
+│ shared (heavy, ~everything)                                                                       │
+│  Ubuntu 26.04 base                                                                                │
+│  • build-essential, cmake, protoc, gdb (built from source)                                        │
+│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                                    │
+│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI                          │
+│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                                    │
+│  • Go + open-spdd, hardwood-cli (Parquet)                                                         │
+│  • emacs-nox (30.x) + gnuplot; fd/rg preinstalled so agents reuse them                            │
+│  • shared caches under /cache for host bind-mounts                                                │
+└───────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ## Build
 
@@ -27,7 +27,8 @@ make shared        # podman build -f shared/Dockerfile -t dev-shared .
 make pi            # + pi agent
 make prime-agent   # + prime-agent agent
 make dsh           # + DeepSeek Harness (dsh web and acp profiles)
-make all           # all three
+make claude        # + Claude Code (TUI + claude-agent-acp)
+make all           # all harnesses
 ```
 
 Docker instead of podman: `make ENGINE=docker all`.
@@ -51,6 +52,10 @@ run-dsh
 
 # dsh as an ACP stdio server for agent-shell/acp.el (no port, no URL)
 run-dsh --acp
+
+# Claude Code: TUI by default, ACP stdio server with --acp
+run-claude
+run-claude --acp
 ```
 
 ## Layout
@@ -63,6 +68,7 @@ run-dsh --acp
 | `bins/run-pi`          | run the `dev-pi` container with host caches/state mounted |
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
 | `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
+| `bins/run-claude`      | run the `dev-claude` container: the `claude` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.claude-container` |
 | `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
 | `dsh/dsh-web-entry`    | container-side web wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
 | `dsh/dsh-acp-entry`    | container-side ACP wrapper: foreground stdio, quiet profile preflight, execs `dsh --profile acp` |
@@ -77,11 +83,16 @@ run-dsh --acp
 | `dsh/acp-commands.patch.yml` | overlay: replaces the stock `acp` row with the command-advertising tap |
 | `dsh/dev-container.test.mjs` | unit tests for the policy parser and prompt text |
 | `dsh/acp-commands.test.mjs` | unit tests for the ACP tap plus an upstream `dsh-acp` stream canary |
+| `claude/Dockerfile`    | `FROM dev-shared` + Claude Code CLI + `claude-agent-acp` adapter (npm) + container policy |
+| `claude/claude-dev-entry` | image ENTRYPOINT: renders the managed settings from `CLAUDE_PERMISSION_MODE`, then execs its arguments |
+| `claude/claude-acp-entry` | container-side ACP wrapper: checks the per-project mounts, execs `claude-agent-acp` |
+| `claude/managed-settings.template.json` | managed settings: initial permission mode + git-write deny rules |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
+| `tests/test_run_claude.py` | dry-run contract tests for `run-claude` TUI/ACP modes |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
-| `Makefile`             | image build targets (`make all`, `make dsh`, …) plus `make test-dsh` / `make test-run-dsh` |
+| `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, …) plus `make test-dsh` / `make test-bins` |
 
-## Running: bins/run-pi, run-pa, and run-dsh
+## Running: bins/run-pi, run-pa, run-dsh, and run-claude
 
 The old `run-pi` bash function in `.bashrc` is replaced by standalone
 Python 3 scripts (stdlib only, Python 3.10+), one per harness. Symlink them
@@ -91,6 +102,7 @@ into `~/.local/bin` (or anywhere on `$PATH`):
 ln -s ~/sem-dev-container/bins/run-pi ~/.local/bin/run-pi
 ln -s ~/sem-dev-container/bins/run-pa ~/.local/bin/run-pa
 ln -s ~/sem-dev-container/bins/run-dsh ~/.local/bin/run-dsh
+ln -s ~/sem-dev-container/bins/run-claude ~/.local/bin/run-claude
 ```
 
 The scripts do what the bash function did: `mkdir -p` the host cache dirs,
@@ -431,6 +443,108 @@ Rebuild the image after changing the overlay or plugin:
 
 ```sh
 make dsh
+```
+
+### Claude Code: bins/run-claude
+
+`run-claude` runs the `dev-claude` image: Claude Code (`@anthropic-ai/claude-code`)
+plus the ACP adapter [`@agentclientprotocol/claude-agent-acp`](https://github.com/agentclientprotocol/claude-agent-acp),
+both pinned in `claude/Dockerfile` and bumped together (the adapter's Claude
+Agent SDK targets one Claude Code release; `CLAUDE_CODE_EXECUTABLE` points
+the adapter at the image's own `claude`, so the TUI and ACP run one binary).
+It uses the same project mount, caches, read-only `.git`, `/target` volume and
+SearXNG forwarding as the other launchers.
+
+```sh
+cd /path/to/project
+run-claude                     # the claude TUI
+run-claude -- --continue       # flags after -- go to `claude`
+run-claude --acp               # ACP over stdio for agent-shell/acp.el
+run-claude --shell             # bash in the container
+run-claude --exec claude doctor
+run-claude --acp --dry-run     # print the podman/docker command
+```
+
+`--acp` follows the `run-dsh --acp` contract: the launcher `exec`s
+podman/docker, forces `-i` and never `-t`, publishes no port, keeps stdout
+protocol-only (the adapter sends its own logs to stderr), exits on stdin EOF,
+is mutually exclusive with `--shell`/`--exec`, and forwards arguments after
+`--` to `claude-agent-acp`.
+
+**agent-shell integration.** Start it from a buffer in the project root:
+
+```emacs-lisp
+(setq agent-shell-anthropic-claude-acp-command '("run-claude" "--acp"))
+;; Optional: (setq agent-shell-anthropic-default-session-mode-id "bypassPermissions")
+```
+
+Then `M-x agent-shell-anthropic-start-claude-code`. The adapter advertises
+Claude Code's slash commands and the global skills, and its session
+list/resume works on the per-project transcripts.
+
+**Authentication.** Claude Code uses the subscription login in the host's
+`~/.claude/.credentials.json`; log in once on the host (`claude /login`) or
+inside the container (`run-claude --shell`, then `claude /login`).
+`ANTHROPIC_API_KEY` is deliberately **not** passed through, so a key set on
+the host for other tools never switches billing to the API; opt in for one
+run with `run-claude --env ANTHROPIC_API_KEY`.
+
+#### Project-local state
+
+The split mirrors `run-dsh`. The host's `~/.claude` is mounted at
+`/root/.claude` (`CLAUDE_CONFIG_DIR`) as the shared home: credentials,
+`settings.json`, global `CLAUDE.md`, skills, agents, commands and plugins.
+The per-session entries are over-mounted on top of it from the project:
+
+```text
+<project>/.claude-container/
+  projects/        # transcripts (session/list, --resume, --continue)
+  sessions/ session-env/ file-history/ shell-snapshots/
+  plans/ todos/ tasks/ paste-cache/ debug/
+  history.jsonl    # prompt history
+```
+
+Add `.claude-container/` to the project's `.gitignore` (this repository
+already does). The shared home stays a directory mount because Claude Code
+rewrites credentials by rename, which a single-file bind mount cannot
+survive. Because `CLAUDE_CONFIG_DIR` is set, the container keeps its global
+state file in `~/.claude/.claude.json`, separate from the host CLI's
+`~/.claude.json`. The list of over-mounted entries is `PROJECT_STATE_DIRS` in
+`bins/run-claude`; if a future Claude Code release adds a new per-session
+directory, it lands in the shared home until it is added there.
+`claude-acp-entry` refuses to start when the launcher expects the
+over-mounts (`CLAUDE_PROJECT_HOME` is set) but `~/.claude/projects` is not a
+mount, so sessions of different projects never mix.
+
+#### Container policy and permissions
+
+Claude Code loads managed policy from `/etc/claude-code` for every session,
+on top of the user and project settings, so the policy lives in the image
+and is never written into the shared `~/.claude`:
+
+- `/etc/claude-code/CLAUDE.md` is `APPEND_SYSTEM.md` (root, disposable OS,
+  `CARGO_TARGET_DIR=/target`, read-only `.git`, commits on the host);
+- `/etc/claude-code/managed-settings.json` is rendered at container start by
+  `claude-dev-entry` from `claude/managed-settings.template.json`: the
+  initial permission mode plus `Bash(git <write>:*)` deny rules, which apply
+  even in bypass mode. Like the dsh guard they are best-effort (the
+  read-only `.git` mount is the enforcement).
+
+`run-claude` exports `CLAUDE_PERMISSION_MODE=bypassPermissions` (the image
+sets `IS_SANDBOX=1`, which Claude Code requires before it allows bypass as
+root), so sessions start without permission prompts and the container is the
+isolation boundary. Override one run with
+`run-claude --env CLAUDE_PERMISSION_MODE=default` (also `acceptEdits`,
+`plan`, `auto`, `dontAsk`); the mode can still be switched inside a session.
+The launcher also exports `CLAUDE_DEV_CONTAINER=1` and, for git projects,
+`CLAUDE_GIT_READ_ONLY=1`.
+
+Rebuild the image after changing anything under `claude/` or
+`APPEND_SYSTEM.md`, and run the launcher tests:
+
+```sh
+make claude
+make test-bins
 ```
 
 ## Web search (SearXNG)

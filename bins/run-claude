@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+run-claude — run the Claude Code dev container (dev-claude) with host
+caches/state mounted.
+
+By default it starts the interactive `claude` TUI in the current project.
+`run-claude --acp` runs the same container (same project mount, state, caches
+and environment) as a foreground ACP stdio server instead: stdin/stdout are
+inherited by `claude-acp-entry` -> `claude-agent-acp`. The launcher execs
+podman/docker, so the ACP client (agent-shell/acp.el in Emacs) owns the pipes,
+signals, and exit status. stdout is protocol-only; diagnostics go to stderr.
+No pseudo-TTY is allocated even when stdin is a terminal, because terminal
+echo and CR/LF translation corrupt ACP framing.
+
+State is split like run-dsh's: the host's ~/.claude is mounted at
+/root/.claude (CLAUDE_CONFIG_DIR) for shared, project-agnostic state
+(credentials, settings, skills, agents, commands, plugins, CLAUDE.md), and the
+per-session state entries (transcripts, file history, plans, todos, prompt
+history, ...) are over-mounted from <project>/.claude-container, so sessions
+stay with the project. Add .claude-container/ to the project's .gitignore.
+
+The image applies a container policy through /etc/claude-code (managed
+CLAUDE.md with the runtime facts, managed settings with git-write deny rules).
+Sessions start in bypassPermissions: the launcher exports
+CLAUDE_PERMISSION_MODE=bypassPermissions. Isolation is the operator's
+responsibility. Override one run with `--env CLAUDE_PERMISSION_MODE=default`.
+
+ANTHROPIC_API_KEY is deliberately not passed through: Claude Code uses the
+subscription login stored in ~/.claude/.credentials.json. Opt in for one run
+with `--env ANTHROPIC_API_KEY`. See README.md.
+
+Examples:
+  run-claude                       # start the claude TUI in $PWD
+  run-claude -- --continue         # flags after -- go to `claude` (container side)
+  run-claude --acp                 # serve ACP over stdio instead (agent-shell/acp.el)
+  run-claude --shell               # drop into bash in the container
+  run-claude --exec claude doctor  # run an arbitrary command instead of the agent
+  run-claude --engine docker       # use docker instead of podman
+  run-claude --dry-run             # print the command instead of running it
+
+Script options must come before `--` or `--exec`; everything after is
+container-side.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+AGENT = "claude"                    # TUI binary run inside the container
+IMAGE = "dev-claude"                # default image (override with --image)
+ACP_ENTRY = "claude-acp-entry"      # foreground ACP stdio entry installed by claude/Dockerfile
+STATE_DIR = ".claude"               # host $HOME/.claude  ->  /root/.claude (CLAUDE_CONFIG_DIR)
+PROJECT_STATE_DIR = ".claude-container"  # <project>/.claude-container: per-project session state
+AGENTS_DIR = ".agents"              # host $HOME/.agents (shared skills, as for run-dsh)
+VOLUME_PREFIX = "claude-target"     # named volume per project: claude-target<escaped pwd> -> /target
+
+# Entries of CLAUDE_CONFIG_DIR that hold per-session state. Each one is
+# over-mounted from <project>/.claude-container/<name>, so it stays with the
+# project; everything else in ~/.claude stays shared with the host.
+# `projects` holds the transcripts (what session/list and --resume read).
+PROJECT_STATE_DIRS = [
+    "projects",
+    "sessions",
+    "session-env",
+    "file-history",
+    "shell-snapshots",
+    "plans",
+    "todos",
+    "tasks",
+    "paste-cache",
+    "debug",
+]
+# Single-file entries: pre-created so the file bind mount has a source.
+PROJECT_STATE_FILES = ["history.jsonl"]
+
+# Claude Code permission mode every session starts in (see claude-dev-entry).
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+# Env vars copied into the container when set on the host (`-e KEY` passes
+# the host value through; unset keys are skipped). Same list as run-dsh minus
+# ANTHROPIC_API_KEY, which would switch Claude Code from the subscription
+# login to API billing.
+PASSTHROUGH_KEYS = [
+    "ZAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "XAI_API_KEY",
+    "PRIME_API_KEY",
+]
+
+
+def resolve_engine(engine: str) -> str:
+    """Pick a container engine: explicit choice, or auto (podman -> docker)."""
+    if engine and engine != "auto":
+        return engine
+    for candidate in ("podman", "docker"):
+        if shutil.which(candidate):
+            return candidate
+    sys.exit("error: no container engine found (tried podman, docker)")
+
+
+def ensure_mount_sources(home: Path, pwd: Path) -> None:
+    """Create host dirs/files that will be bind-mounted (podman refuses to create them)."""
+    project_state = pwd / PROJECT_STATE_DIR
+    dirs = [
+        pwd,
+        home / STATE_DIR,
+        home / AGENTS_DIR,
+        home / ".cargo/registry",
+        home / ".cache/coursier",
+        home / ".ivy2",
+        home / ".cache/uv",
+        home / ".cache/pip",
+        home / ".cache/pypoetry",
+        home / ".m2/repository",
+    ] + [project_state / name for name in PROJECT_STATE_DIRS]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+    for name in PROJECT_STATE_FILES:
+        (project_state / name).touch(exist_ok=True)
+
+
+def has_git_dir(pwd: Path) -> bool:
+    """Whether the project has a .git to re-mount read-only (and report)."""
+    return (pwd / ".git").exists()
+
+
+def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
+    """-v specs: bind mounts (host:container) + the per-project named volume."""
+    z = ":z" if selinux else ""
+    config_dir = f"/root/{STATE_DIR}"
+    specs = [
+        f"{pwd}:{pwd}{z}",
+        f"{home / STATE_DIR}:{config_dir}{z}",
+        f"{home / AGENTS_DIR}:/root/{AGENTS_DIR}{z}",
+        f"{home / '.cargo/registry'}:/usr/local/cargo/registry{z}",
+        f"{home / '.cache/coursier'}:/cache/coursier{z}",
+        f"{home / '.ivy2'}:/cache/ivy2{z}",
+        f"{home / '.cache/uv'}:/cache/uv{z}",
+        f"{home / '.cache/pip'}:/cache/pip{z}",
+        f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
+        f"{home / '.m2/repository'}:/cache/maven{z}",
+    ]
+    # Over-mount the per-session state entries on top of the shared
+    # ~/.claude mount above (a later -v entry wins), so transcripts and
+    # friends land in <project>/.claude-container while credentials and
+    # settings stay shared with the host. The shared dir itself stays a
+    # directory mount: credentials are rewritten by rename, which a
+    # single-file bind mount cannot survive.
+    project_state = pwd / PROJECT_STATE_DIR
+    for name in PROJECT_STATE_DIRS + PROJECT_STATE_FILES:
+        specs.append(f"{project_state / name}:{config_dir}/{name}{z}")
+    # Re-mount .git read-only over the rw project mount above: the agent can
+    # read history and diffs, but every git write (commit, push, stash,
+    # checkout, rebase) fails inside the container -- commits belong on the
+    # host, signed with the operator's key (see APPEND_SYSTEM.md). Skipped
+    # for non-git projects: podman would create a stray .git/ dir in them.
+    git_dir = pwd / ".git"
+    if has_git_dir(pwd):
+        specs.append(f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}")
+    # Named (docker-managed) volume, one per host project dir, so builds the
+    # agent runs in the workspace keep their target dir across runs.
+    volume = VOLUME_PREFIX + str(pwd).replace("/", "_")
+    specs.append(f"{volume}:/target")
+    return specs
+
+
+def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
+    """-e specs: fixed, then passthrough keys set on the host, then --env extras.
+
+    Kept in a dict keyed by variable name so a later --env entry replaces an
+    earlier passthrough of the same key (last one wins).
+    """
+    envs: dict[str, str] = {
+        "CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target",
+        # The container is a single-purpose isolation boundary, so every
+        # session starts in bypassPermissions. A later --env
+        # CLAUDE_PERMISSION_MODE=... in `extra` replaces this default.
+        "CLAUDE_PERMISSION_MODE": f"CLAUDE_PERMISSION_MODE={DEFAULT_PERMISSION_MODE}",
+    }
+    if forward_searxng:
+        envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
+    for key in PASSTHROUGH_KEYS:
+        if os.environ.get(key) is not None:
+            envs[key] = key  # bare KEY: container copies the host value
+    for spec in extra:
+        envs[spec.split("=", 1)[0]] = spec
+    return list(envs.values())
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="run-claude",
+        description="Run the Claude Code dev container (dev-claude) with host caches/state "
+                    "mounted: the claude TUI by default, or an ACP stdio server with --acp.",
+        epilog="Non-flag arguments are passed to the container app (`claude`, or "
+               "`claude-agent-acp` with --acp; use -- to start them). Script options "
+               "must come before `--`/`--exec`: everything after is container-side.",
+    )
+    p.add_argument("--shell", action="store_true",
+                   help="drop into an interactive bash shell instead of the agent")
+    p.add_argument("--acp", action="store_true",
+                   help="serve the ACP stdio transport instead of the TUI "
+                        "(for agent-shell/acp.el; stdin/stdout belong to the ACP client)")
+    p.add_argument("--exec", dest="exec_cmd", nargs=argparse.REMAINDER, metavar="CMD",
+                   help="run CMD... as-is instead of the agent (e.g. --exec claude doctor)")
+    p.add_argument("--engine", default="auto", metavar="ENGINE",
+                   help="container engine: podman, docker, or auto (default: auto)")
+    p.add_argument("--image", default=IMAGE, metavar="TAG",
+                   help=f"image to run (default: {IMAGE})")
+    p.add_argument("--no-selinux", dest="selinux", action="store_false", default=True,
+                   help="omit the :z suffix on bind mounts (non-SELinux hosts)")
+    p.add_argument("--env", action="append", default=[], metavar="KEY[=VALUE]",
+                   help="extra env var to pass into the container (repeatable); "
+                        "KEY alone passes the host value through")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the command and exit without running it")
+    p.add_argument("agent_args", nargs="*", metavar="ARG",
+                   help="extra arguments forwarded to the container app")
+    args = p.parse_args(argv)
+    # argparse cannot express mutual exclusion with --exec's REMAINDER, so
+    # reject the combination explicitly. (--acp after --exec is container-side,
+    # like every other argument there.)
+    if args.acp and (args.shell or args.exec_cmd):
+        p.error("--acp cannot be combined with --shell or --exec")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    home = Path.home()
+    pwd = Path.cwd()
+    engine = resolve_engine(args.engine)
+
+    ensure_mount_sources(home, pwd)
+
+    # ACP owns stdin/stdout: attach stdin (-i) but never allocate a TTY, even
+    # when run-claude itself was started from a terminal. `-t` turns on
+    # terminal echo and CR/LF translation, both of which corrupt ACP JSON-RPC
+    # framing. The TUI keeps its interactive terminal when stdin is a TTY.
+    if args.acp:
+        cmd = [engine, "run", "--rm", "-i"]
+    else:
+        cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
+    for spec in build_mounts(home, pwd, args.selinux):
+        cmd += ["-v", spec]
+    cmd += ["-w", str(pwd)]
+    # CLAUDE_PROJECT_HOME tells claude-acp-entry that the per-project
+    # over-mounts are expected (it refuses to run with shared transcripts
+    # otherwise). CLAUDE_DEV_CONTAINER marks a run-claude launch (visible to
+    # the agent's shell); CLAUDE_GIT_READ_ONLY mirrors the read-only .git
+    # mount that build_mounts adds. They are defaults: a later --env wins.
+    project_envs = [
+        f"CLAUDE_PROJECT_HOME={pwd / PROJECT_STATE_DIR}",
+        "CLAUDE_DEV_CONTAINER=1",
+    ]
+    if has_git_dir(pwd):
+        project_envs.append("CLAUDE_GIT_READ_ONLY=1")
+    for env in build_envs(project_envs + args.env,
+                          forward_searxng=engine == "podman"):
+        cmd += ["-e", env]
+    # -T 7331 forwards only container loopback port 7331 to the same port on
+    # host loopback for SearXNG. Docker has no equivalent: publish SearXNG on
+    # a host-reachable address and override SEARXNG_URL instead.
+    if engine == "podman":
+        cmd += ["--network", "pasta:-T,7331"]
+    cmd.append(args.image)
+
+    if args.acp:
+        cmd += [ACP_ENTRY] + args.agent_args
+        if args.dry_run:
+            print(" ".join(shlex.quote(c) for c in cmd))
+            return 0
+        if sys.stdin.isatty():
+            print("run-claude: warning: --acp expects an ACP client on stdin; "
+                  "stdin is a terminal, so no handshake will arrive",
+                  file=sys.stderr, flush=True)
+        # Replace the launcher with podman/docker: stdio passes through
+        # untouched, the client's signals reach the container engine, and the
+        # container's exit status is this process's exit status.
+        try:
+            os.execvp(cmd[0], cmd)
+        except OSError as exc:
+            print(f"run-claude: cannot execute {cmd[0]}: {exc}", file=sys.stderr)
+            return 127
+    if args.shell:
+        cmd.append("bash")
+    elif args.exec_cmd:
+        cmd += args.exec_cmd
+    else:
+        cmd += [AGENT] + args.agent_args
+
+    if args.dry_run:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return 0
+    return subprocess.run(cmd).returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

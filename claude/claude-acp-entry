@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# claude-acp-entry — foreground ACP stdio server for the dev-claude container.
+#
+# The container command behind `run-claude --acp` (run through
+# claude-dev-entry, which has already rendered the managed settings). stdin,
+# stdout, stderr and the exit status belong to `claude-agent-acp`, which an
+# ACP client such as Emacs agent-shell/acp.el speaks to directly. The adapter
+# redirects its own console.log to stderr and exits on stdin EOF, and
+# run-claude execs podman/docker, so no stdin watcher or signal relay is
+# needed here.
+#
+# stdout is a protocol socket: every byte on it must be an ACP JSON-RPC frame.
+# Diagnostics go to stderr.
+
+set -euo pipefail
+
+# Project isolation is the reason run-claude exports CLAUDE_PROJECT_HOME: it
+# over-mounts <project>/.claude-container/projects (transcripts) on top of
+# the host-shared ~/.claude. If that mount is missing, sessions would land in
+# the shared home and `session/list` would mix projects, so fail loudly.
+if [ -n "${CLAUDE_PROJECT_HOME:-}" ]; then
+    projects="${CLAUDE_CONFIG_DIR:-/root/.claude}/projects"
+    if ! mountpoint -q "$projects"; then
+        echo "claude-acp-entry: CLAUDE_PROJECT_HOME is set but $projects is not" \
+             "a mount; refusing to run with shared project state" >&2
+        exit 1
+    fi
+fi
+
+exec claude-agent-acp "$@"

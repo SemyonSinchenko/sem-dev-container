@@ -8,3 +8,6 @@ __pycache__/
 
 # DeepSeek Harness project-local state (run-dsh)
 .dsh/
+
+# Claude Code project-local state (run-claude)
+.claude-container/

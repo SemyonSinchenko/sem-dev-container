@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "defaultMode": "__PERMISSION_MODE__",
+    "deny": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git restore:*)",
+      "Bash(git rebase:*)",
+      "Bash(git reset:*)",
+      "Bash(git merge:*)",
+      "Bash(git cherry-pick:*)",
+      "Bash(git revert:*)",
+      "Bash(git tag:*)",
+      "Bash(git am:*)",
+      "Bash(git apply:*)",
+      "Bash(git add:*)",
+      "Bash(git rm:*)",
+      "Bash(git mv:*)",
+      "Bash(git branch -d:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(git gc:*)",
+      "Bash(git config:*)",
+      "Bash(git clean:*)",
+      "Bash(git init:*)",
+      "Bash(git prune:*)"
+    ]
+  },
+  "skipDangerousModePermissionPrompt": true
+}
