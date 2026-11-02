@@ -69,6 +69,7 @@ run-claude --acp
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
 | `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
 | `bins/run-claude`      | run the `dev-claude` container: the `claude` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.claude-container` |
+| `bins/devc_common.py`  | helpers shared by the `run-*` launchers (engine, cache mounts, `.git` ro remount, `/target` volume, env merge); found next to the symlink-resolved script |
 | `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
 | `dsh/dsh-web-entry`    | container-side web wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
 | `dsh/dsh-acp-entry`    | container-side ACP wrapper: foreground stdio, quiet profile preflight, execs `dsh --profile acp` |
@@ -89,6 +90,7 @@ run-claude --acp
 | `claude/managed-settings.template.json` | managed settings: initial permission mode + git-write deny rules |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
 | `tests/test_run_claude.py` | dry-run contract tests for `run-claude` TUI/ACP modes |
+| `tests/test_devc_common.py` | unit tests for `devc_common` plus the symlinked/copied launcher install check |
 | `tests/test_golden_compat.py` | golden tests: every `run-*` launcher's `--dry-run` command stays byte-identical |
 | `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port) |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
@@ -645,3 +647,30 @@ a host-reachable address in the quadlet (`PublishPort=`) and run with
   own IP and `run-dsh` publishes the port on `127.0.0.1` only — dsh-emacs and
   the browser are expected on the same machine. ACP mode publishes nothing;
   its client speaks over stdin/stdout.
+- **Podman behaviour the multi-agent mount modes rely on** (spike for
+  `MULTI_AGENT_ROLES_PLAN.md` §4; podman 5.8.9, rootless, Fedora, SELinux
+  enforcing, 2026-11-02):
+  - `:O` (overlay) works on a project never labelled for containers
+    (`cache_home_t`) as well as on one labelled by an earlier `:z` run, so
+    no relabel preflight is needed. podman rejects `:O,z` ("can only
+    specify 1 'z', 'Z', or 'O' option").
+  - A nested rw bind (`-v <dir>:<dir>:z`) over an `:O` or `:ro,z` project
+    mount reaches the host; every other project write is discarded (`:O`)
+    or fails with `Read-only file system` (`:ro`).
+  - The read-only `.git` remount holds over `:O` and `:ro`: `git status` /
+    `git diff` work, writes into `.git` and `git commit` fail.
+  - `podman run --timeout N` kills the container after N seconds and exits
+    **255**, also with `-i` and stdin held open (ACP mode). `podman stop`
+    that has to escalate to SIGKILL exits 137.
+  - The overlay's upper layer is removed with `--rm` (`podman system df`
+    unchanged after writing 200 MB inside).
+  - An `:O` mount is **not a snapshot**: host changes to files the
+    container hasn't touched show up inside within about a second (edits,
+    new files, deletions), while files the container wrote keep its
+    version. No errors were seen, but the kernel documents this as
+    undefined. Start overlay containers after `rw` writers on the same
+    project have finished.
+  - A `flock` taken by the launcher in an inheritable fd and `execvp`'d into
+    `podman run` is held until the container exits and released on normal
+    exit, `--timeout` and `podman stop`. The fd isn't visible inside the
+    container.

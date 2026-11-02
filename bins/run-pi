@@ -20,12 +20,19 @@ Anything after "--" (or bare positionals) is passed to the `pi` binary.
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Shared launcher helpers live next to the real script (bins/devc_common.py);
+# resolve() follows the ~/.local/bin symlink back to the repo.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import devc_common as dc
+except ImportError:
+    sys.exit("run-pi: bins/devc_common.py not found next to the real "
+             "script; install the launcher as a symlink (see README)")
 
 AGENT = "pi"                    # binary run inside the container
 IMAGE = "dev-pi"                # default image (override with --image)
@@ -46,28 +53,12 @@ PASSTHROUGH_KEYS = [
 ]
 
 
-def resolve_engine(engine: str) -> str:
-    """Pick a container engine: explicit choice, or auto (podman -> docker)."""
-    if engine and engine != "auto":
-        return engine
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
-    sys.exit("error: no container engine found (tried podman, docker)")
-
-
 def ensure_mount_sources(home: Path, pwd: Path) -> None:
     """Create host dirs that will be bind-mounted (podman refuses to create them)."""
     dirs = [
         pwd,
         home / STATE_DIR,
-        home / ".cargo/registry",
-        home / ".cache/coursier",
-        home / ".ivy2",
-        home / ".cache/uv",
-        home / ".cache/pip",
-        home / ".cache/pypoetry",
-        home / ".m2/repository",
+        *dc.cache_dirs(home),
     ]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
@@ -79,45 +70,23 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     specs = [
         f"{pwd}:{pwd}{z}",
         f"{home / STATE_DIR}:/root/{STATE_DIR}{z}",
-        f"{home / '.cargo/registry'}:/usr/local/cargo/registry{z}",
-        f"{home / '.cache/coursier'}:/cache/coursier{z}",
-        f"{home / '.ivy2'}:/cache/ivy2{z}",
-        f"{home / '.cache/uv'}:/cache/uv{z}",
-        f"{home / '.cache/pip'}:/cache/pip{z}",
-        f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
-        f"{home / '.m2/repository'}:/cache/maven{z}",
+        *dc.cache_mounts(home, z),
     ]
     # Re-mount .git read-only over the rw project mount above (a later -v
-    # entry wins): the agent can read history and diffs, but every git write
-    # (commit, push, stash, checkout, rebase) fails inside the container --
-    # commits belong on the host, signed with the operator's key (see
-    # APPEND_SYSTEM.md). Skipped for non-git projects: podman would create
-    # a stray .git/ dir in them.
-    git_dir = pwd / ".git"
-    if git_dir.exists():
-        specs.append(f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}")
+    # entry wins; see APPEND_SYSTEM.md): commits belong on the host.
+    specs += dc.git_ro_mount(pwd, selinux)
     # Named (docker-managed) volume, one per host project dir, so cargo
     # builds survive container teardown and are shared across runs.
-    volume = VOLUME_PREFIX + str(pwd).replace("/", "_")
-    specs.append(f"{volume}:/target")
+    specs.append(f"{dc.target_volume(VOLUME_PREFIX, pwd)}:/target")
     return specs
 
 
 def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
-    """-e specs: fixed, then passthrough keys set on the host, then --env extras.
-
-    Kept in a dict keyed by variable name so a later --env entry replaces an
-    earlier passthrough of the same key (last one wins).
-    """
+    """-e specs: fixed, then passthrough keys set on the host, then --env extras
+    (last one wins; see devc_common.merge_envs)."""
     envs: dict[str, str] = {"CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target"}
-    if forward_searxng:
-        envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
-    for key in PASSTHROUGH_KEYS:
-        if os.environ.get(key) is not None:
-            envs[key] = key  # bare KEY: container copies the host value
-    for spec in extra:
-        envs[spec.split("=", 1)[0]] = spec
-    return list(envs.values())
+    return dc.merge_envs(envs, PASSTHROUGH_KEYS, extra,
+                         forward_searxng=forward_searxng)
 
 
 def build_container_command(args: argparse.Namespace) -> list[str]:
@@ -163,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     home = Path.home()
     pwd = Path.cwd()
-    engine = resolve_engine(args.engine)
+    engine = dc.resolve_engine(args.engine)
 
     ensure_mount_sources(home, pwd)
 

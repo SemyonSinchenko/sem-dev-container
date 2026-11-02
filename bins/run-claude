@@ -47,10 +47,18 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
-import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Shared launcher helpers live next to the real script (bins/devc_common.py);
+# resolve() follows the ~/.local/bin symlink back to the repo.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import devc_common as dc
+except ImportError:
+    sys.exit("run-claude: bins/devc_common.py not found next to the real "
+             "script; install the launcher as a symlink (see README)")
 
 AGENT = "claude"                    # TUI binary run inside the container
 IMAGE = "dev-claude"                # default image (override with --image)
@@ -97,16 +105,6 @@ PASSTHROUGH_KEYS = [
 ]
 
 
-def resolve_engine(engine: str) -> str:
-    """Pick a container engine: explicit choice, or auto (podman -> docker)."""
-    if engine and engine != "auto":
-        return engine
-    for candidate in ("podman", "docker"):
-        if shutil.which(candidate):
-            return candidate
-    sys.exit("error: no container engine found (tried podman, docker)")
-
-
 def ensure_mount_sources(home: Path, pwd: Path) -> None:
     """Create host dirs/files that will be bind-mounted (podman refuses to create them)."""
     project_state = pwd / PROJECT_STATE_DIR
@@ -114,23 +112,12 @@ def ensure_mount_sources(home: Path, pwd: Path) -> None:
         pwd,
         home / STATE_DIR,
         home / AGENTS_DIR,
-        home / ".cargo/registry",
-        home / ".cache/coursier",
-        home / ".ivy2",
-        home / ".cache/uv",
-        home / ".cache/pip",
-        home / ".cache/pypoetry",
-        home / ".m2/repository",
+        *dc.cache_dirs(home),
     ] + [project_state / name for name in PROJECT_STATE_DIRS]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
     for name in PROJECT_STATE_FILES:
         (project_state / name).touch(exist_ok=True)
-
-
-def has_git_dir(pwd: Path) -> bool:
-    """Whether the project has a .git to re-mount read-only (and report)."""
-    return (pwd / ".git").exists()
 
 
 def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
@@ -141,13 +128,7 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
         f"{pwd}:{pwd}{z}",
         f"{home / STATE_DIR}:{config_dir}{z}",
         f"{home / AGENTS_DIR}:/root/{AGENTS_DIR}{z}",
-        f"{home / '.cargo/registry'}:/usr/local/cargo/registry{z}",
-        f"{home / '.cache/coursier'}:/cache/coursier{z}",
-        f"{home / '.ivy2'}:/cache/ivy2{z}",
-        f"{home / '.cache/uv'}:/cache/uv{z}",
-        f"{home / '.cache/pip'}:/cache/pip{z}",
-        f"{home / '.cache/pypoetry'}:/cache/poetry{z}",
-        f"{home / '.m2/repository'}:/cache/maven{z}",
+        *dc.cache_mounts(home, z),
     ]
     # Over-mount the per-session state entries on top of the shared
     # ~/.claude mount above (a later -v entry wins), so transcripts and
@@ -158,42 +139,27 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     project_state = pwd / PROJECT_STATE_DIR
     for name in PROJECT_STATE_DIRS + PROJECT_STATE_FILES:
         specs.append(f"{project_state / name}:{config_dir}/{name}{z}")
-    # Re-mount .git read-only over the rw project mount above: the agent can
-    # read history and diffs, but every git write (commit, push, stash,
-    # checkout, rebase) fails inside the container -- commits belong on the
-    # host, signed with the operator's key (see APPEND_SYSTEM.md). Skipped
-    # for non-git projects: podman would create a stray .git/ dir in them.
-    git_dir = pwd / ".git"
-    if has_git_dir(pwd):
-        specs.append(f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}")
+    # Re-mount .git read-only over the rw project mount above (see
+    # APPEND_SYSTEM.md): commits belong on the host.
+    specs += dc.git_ro_mount(pwd, selinux)
     # Named (docker-managed) volume, one per host project dir, so builds the
     # agent runs in the workspace keep their target dir across runs.
-    volume = VOLUME_PREFIX + str(pwd).replace("/", "_")
-    specs.append(f"{volume}:/target")
+    specs.append(f"{dc.target_volume(VOLUME_PREFIX, pwd)}:/target")
     return specs
 
 
 def build_envs(extra: list[str], *, forward_searxng: bool = False) -> list[str]:
-    """-e specs: fixed, then passthrough keys set on the host, then --env extras.
-
-    Kept in a dict keyed by variable name so a later --env entry replaces an
-    earlier passthrough of the same key (last one wins).
-    """
-    envs: dict[str, str] = {
+    """-e specs: fixed, then passthrough keys set on the host, then --env extras
+    (last one wins; see devc_common.merge_envs)."""
+    fixed = {
         "CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target",
         # The container is a single-purpose isolation boundary, so every
         # session starts in bypassPermissions. A later --env
         # CLAUDE_PERMISSION_MODE=... in `extra` replaces this default.
         "CLAUDE_PERMISSION_MODE": f"CLAUDE_PERMISSION_MODE={DEFAULT_PERMISSION_MODE}",
     }
-    if forward_searxng:
-        envs["SEARXNG_URL"] = "SEARXNG_URL=http://127.0.0.1:7331"
-    for key in PASSTHROUGH_KEYS:
-        if os.environ.get(key) is not None:
-            envs[key] = key  # bare KEY: container copies the host value
-    for spec in extra:
-        envs[spec.split("=", 1)[0]] = spec
-    return list(envs.values())
+    return dc.merge_envs(fixed, PASSTHROUGH_KEYS, extra,
+                         forward_searxng=forward_searxng)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -238,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     home = Path.home()
     pwd = Path.cwd()
-    engine = resolve_engine(args.engine)
+    engine = dc.resolve_engine(args.engine)
 
     ensure_mount_sources(home, pwd)
 
@@ -262,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         f"CLAUDE_PROJECT_HOME={pwd / PROJECT_STATE_DIR}",
         "CLAUDE_DEV_CONTAINER=1",
     ]
-    if has_git_dir(pwd):
+    if dc.has_git_dir(pwd):
         project_envs.append("CLAUDE_GIT_READ_ONLY=1")
     for env in build_envs(project_envs + args.env,
                           forward_searxng=engine == "podman"):
