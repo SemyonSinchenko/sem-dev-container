@@ -38,6 +38,14 @@ Examples:
   run-claude --engine docker       # use docker instead of podman
   run-claude --dry-run             # print the command instead of running it
 
+Multi-agent runs: `--role NAME` gives the container its own session state
+(<project>/.claude-container/roles/NAME), its own /target volume
+(claude-target.NAME<escaped pwd>, or the legacy one with --shared-target),
+AGENT_ROLE=NAME and the labels sem.harness/sem.project/sem.role. Only one
+container per role and project runs at a time (a lock in the role dir;
+--allow-duplicate-role skips it). Without these options nothing changes.
+See MULTI_AGENT_ROLES_PLAN.md.
+
 Script options must come before `--` or `--exec`; everything after is
 container-side.
 """
@@ -105,9 +113,15 @@ PASSTHROUGH_KEYS = [
 ]
 
 
-def ensure_mount_sources(home: Path, pwd: Path) -> None:
+def project_state_dir(pwd: Path, role: str | None) -> Path:
+    """Where the per-session state entries live: per project, or per role."""
+    if role is None:
+        return pwd / PROJECT_STATE_DIR
+    return pwd / PROJECT_STATE_DIR / "roles" / role
+
+
+def ensure_mount_sources(home: Path, pwd: Path, project_state: Path) -> None:
     """Create host dirs/files that will be bind-mounted (podman refuses to create them)."""
-    project_state = pwd / PROJECT_STATE_DIR
     dirs = [
         pwd,
         home / STATE_DIR,
@@ -120,7 +134,8 @@ def ensure_mount_sources(home: Path, pwd: Path) -> None:
         (project_state / name).touch(exist_ok=True)
 
 
-def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
+def build_mounts(home: Path, pwd: Path, selinux: bool, project_state: Path,
+                 volume: str) -> list[str]:
     """-v specs: bind mounts (host:container) + the per-project named volume."""
     z = ":z" if selinux else ""
     config_dir = f"/root/{STATE_DIR}"
@@ -135,8 +150,8 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     # friends land in <project>/.claude-container while credentials and
     # settings stay shared with the host. The shared dir itself stays a
     # directory mount: credentials are rewritten by rename, which a
-    # single-file bind mount cannot survive.
-    project_state = pwd / PROJECT_STATE_DIR
+    # single-file bind mount cannot survive. With --role, project_state is
+    # the role's own dir, so parallel roles never share transcripts.
     for name in PROJECT_STATE_DIRS + PROJECT_STATE_FILES:
         specs.append(f"{project_state / name}:{config_dir}/{name}{z}")
     # Re-mount .git read-only over the rw project mount above (see
@@ -144,7 +159,7 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     specs += dc.git_ro_mount(pwd, selinux)
     # Named (docker-managed) volume, one per host project dir, so builds the
     # agent runs in the workspace keep their target dir across runs.
-    specs.append(f"{dc.target_volume(VOLUME_PREFIX, pwd)}:/target")
+    specs.append(f"{volume}:/target")
     return specs
 
 
@@ -189,6 +204,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "KEY alone passes the host value through")
     p.add_argument("--dry-run", action="store_true",
                    help="print the command and exit without running it")
+    dc.add_role_args(p)
     p.add_argument("agent_args", nargs="*", metavar="ARG",
                    help="extra arguments forwarded to the container app")
     args = p.parse_args(argv)
@@ -197,6 +213,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     # like every other argument there.)
     if args.acp and (args.shell or args.exec_cmd):
         p.error("--acp cannot be combined with --shell or --exec")
+    dc.check_role_args(p, args)
     return args
 
 
@@ -205,8 +222,14 @@ def main(argv: list[str] | None = None) -> int:
     home = Path.home()
     pwd = Path.cwd()
     engine = dc.resolve_engine(args.engine)
+    project_state = project_state_dir(pwd, args.role)
+    volume = dc.target_volume(VOLUME_PREFIX, pwd, args.role, args.shared_target)
 
-    ensure_mount_sources(home, pwd)
+    ensure_mount_sources(home, pwd, project_state)
+    # One container per role and project: two would share one role dir.
+    # Taken under --dry-run too (released at exit), so the guard is testable.
+    if args.role is not None and not args.allow_duplicate_role:
+        dc.acquire_role_lock(project_state / ".lock", args.role, "run-claude")
 
     # ACP owns stdin/stdout: attach stdin (-i) but never allocate a TTY, even
     # when run-claude itself was started from a terminal. `-t` turns on
@@ -216,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd = [engine, "run", "--rm", "-i"]
     else:
         cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
-    for spec in build_mounts(home, pwd, args.selinux):
+    cmd += dc.role_labels(AGENT, pwd, args.role)
+    for spec in build_mounts(home, pwd, args.selinux, project_state, volume):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
     # CLAUDE_PROJECT_HOME tells claude-acp-entry that the per-project
@@ -225,11 +249,13 @@ def main(argv: list[str] | None = None) -> int:
     # the agent's shell); CLAUDE_GIT_READ_ONLY mirrors the read-only .git
     # mount that build_mounts adds. They are defaults: a later --env wins.
     project_envs = [
-        f"CLAUDE_PROJECT_HOME={pwd / PROJECT_STATE_DIR}",
+        f"CLAUDE_PROJECT_HOME={project_state}",
         "CLAUDE_DEV_CONTAINER=1",
     ]
     if dc.has_git_dir(pwd):
         project_envs.append("CLAUDE_GIT_READ_ONLY=1")
+    if args.role is not None:
+        project_envs.append(f"AGENT_ROLE={args.role}")
     for env in build_envs(project_envs + args.env,
                           forward_searxng=engine == "podman"):
         cmd += ["-e", env]

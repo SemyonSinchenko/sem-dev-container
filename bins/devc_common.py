@@ -6,13 +6,21 @@ their real (symlink-resolved) path, so installing them as symlinks into
 
 Only mechanics that are identical across launchers live here: engine
 resolution, the cache bind mounts, the read-only .git remount, the /target
-volume name and the env merge. Harness-specific parts (state mounts,
+volume name, the env merge, and the multi-agent options (roles; see
+MULTI_AGENT_ROLES_PLAN.md). Harness-specific parts (state mounts,
 passthrough key lists, ports, entries) stay in the scripts.
+
+The multi-agent options are opaque capabilities: a role name is only used
+for paths, volume names and labels. Without them every launcher behaves
+exactly as before (tests/test_golden_compat.py).
 """
 
 from __future__ import annotations
 
+import argparse
+import fcntl
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -73,9 +81,19 @@ def git_ro_mount(pwd: Path, selinux: bool) -> list[str]:
     return [f"{git_dir}:{git_dir}:{'ro,z' if selinux else 'ro'}"]
 
 
-def target_volume(prefix: str, pwd: Path) -> str:
-    """Named volume for /target, one per host project dir."""
-    return prefix + str(pwd).replace("/", "_")
+def target_volume(prefix: str, pwd: Path, role: str | None = None,
+                  shared: bool = False) -> str:
+    """Named volume for /target, one per host project dir (and role).
+
+    Legacy: <prefix><escaped pwd>. With a role: <prefix>.<role><escaped pwd>.
+    The escaped path always starts with "_" and role names contain neither
+    "." nor "_", so no project/role pair can produce another pair's name.
+    `shared` keeps the legacy name even with a role.
+    """
+    escaped = str(pwd).replace("/", "_")
+    if role is None or shared:
+        return prefix + escaped
+    return f"{prefix}.{role}{escaped}"
 
 
 def merge_envs(fixed: dict[str, str], passthrough_keys: list[str],
@@ -95,3 +113,84 @@ def merge_envs(fixed: dict[str, str], passthrough_keys: list[str],
     for spec in extra:
         envs[spec.split("=", 1)[0]] = spec
     return list(envs.values())
+
+
+# --- multi-agent options ----------------------------------------------------
+
+# Role names end up in paths, volume names and label values.
+ROLE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+# Label keys set automatically with --role.
+LABEL_HARNESS = "sem.harness"
+LABEL_PROJECT = "sem.project"
+LABEL_ROLE = "sem.role"
+
+# Exit status when the role lock is already held.
+EXIT_ROLE_BUSY = 2
+
+
+def role_name(value: str) -> str:
+    """argparse type for --role."""
+    if not ROLE_RE.match(value):
+        raise argparse.ArgumentTypeError(
+            f"invalid role {value!r}: use a lowercase letter followed by up to "
+            "31 lowercase letters, digits or '-'")
+    return value
+
+
+def add_role_args(parser: argparse.ArgumentParser, *, lock: bool = True) -> None:
+    """Register --role, --shared-target and (if the launcher locks roles)
+    --allow-duplicate-role."""
+    parser.add_argument("--role", type=role_name, metavar="NAME",
+                        help="run as role NAME: per-role session state, per-role "
+                             "/target volume, AGENT_ROLE and sem.* labels "
+                             "(default: the legacy per-project layout)")
+    parser.add_argument("--shared-target", action="store_true",
+                        help="with --role: use the project's legacy /target volume "
+                             "instead of the per-role one")
+    if lock:
+        parser.add_argument("--allow-duplicate-role", action="store_true",
+                            help="with --role: start even if a container for this "
+                                 "role and project is already running")
+
+
+def check_role_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject role modifiers given without --role."""
+    if args.role is not None:
+        return
+    if args.shared_target:
+        parser.error("--shared-target requires --role")
+    if getattr(args, "allow_duplicate_role", False):
+        parser.error("--allow-duplicate-role requires --role")
+
+
+def role_labels(harness: str, pwd: Path, role: str | None) -> list[str]:
+    """`--label` options identifying a role container (none without a role)."""
+    if role is None:
+        return []
+    labels = [f"{LABEL_HARNESS}={harness}", f"{LABEL_PROJECT}={pwd}",
+              f"{LABEL_ROLE}={role}"]
+    return [opt for label in labels for opt in ("--label", label)]
+
+
+def acquire_role_lock(lock_path: Path, role: str, prog: str) -> int:
+    """Take the one-container-per-role lock, or exit EXIT_ROLE_BUSY.
+
+    An exclusive, non-blocking flock on `lock_path`, held in an inheritable
+    fd so it survives os.execvp into podman/docker (ACP mode). In the other
+    modes the launcher itself waits for the container client, so it holds
+    the lock. Either way the lock lives exactly as long as the foreground
+    container client. The kernel releases it when the last holder exits,
+    even on a crash, so there is no stale-lock cleanup. The fd is
+    deliberately never closed by the caller.
+    """
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        print(f"{prog}: role {role} is already running for this project "
+              "(use --allow-duplicate-role to override)", file=sys.stderr)
+        sys.exit(EXIT_ROLE_BUSY)
+    os.set_inheritable(fd, True)
+    return fd

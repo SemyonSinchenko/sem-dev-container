@@ -59,6 +59,14 @@ Examples:
   run-dsh --engine docker       # use docker instead of podman
   run-dsh --dry-run             # print the command instead of running it
 
+Multi-agent runs: `--role NAME` gives the container its own DSH project
+data (<project>/.dsh/roles/NAME; the workspace stays the project), its own
+/target volume (dsh-target.NAME<escaped pwd>, or the legacy one with
+--shared-target), AGENT_ROLE=NAME and the labels
+sem.harness/sem.project/sem.role. Only one container per role and project
+runs at a time (a lock in the role dir; --allow-duplicate-role skips it).
+Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
+
 Script options must come before `--` or `--exec`; everything after is
 container-side.
 """
@@ -127,11 +135,18 @@ PASSTHROUGH_KEYS = [
 ]
 
 
-def ensure_mount_sources(home: Path, pwd: Path) -> None:
+def project_state_dir(pwd: Path, role: str | None) -> Path:
+    """Where DSH keeps project data (sessions, storages): per project, or per role."""
+    if role is None:
+        return pwd / PROJECT_STATE_DIR
+    return pwd / PROJECT_STATE_DIR / "roles" / role
+
+
+def ensure_mount_sources(home: Path, pwd: Path, project_state: Path) -> None:
     """Create host dirs that will be bind-mounted (podman refuses to create them)."""
     dirs = [
         pwd,
-        pwd / PROJECT_STATE_DIR,
+        project_state,
         home / STATE_DIR,
         home / AGENTS_DIR,
         *dc.cache_dirs(home),
@@ -140,7 +155,7 @@ def ensure_mount_sources(home: Path, pwd: Path) -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
-def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
+def build_mounts(home: Path, pwd: Path, selinux: bool, volume: str) -> list[str]:
     """-v specs: bind mounts (host:container) + the per-project named volume."""
     z = ":z" if selinux else ""
     specs = [
@@ -154,7 +169,7 @@ def build_mounts(home: Path, pwd: Path, selinux: bool) -> list[str]:
     specs += dc.git_ro_mount(pwd, selinux)
     # Named (docker-managed) volume, one per host project dir, so builds the
     # dsh agent runs in the workspace keep their target dir across runs.
-    specs.append(f"{dc.target_volume(VOLUME_PREFIX, pwd)}:/target")
+    specs.append(f"{volume}:/target")
     return specs
 
 
@@ -316,6 +331,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "KEY alone passes the host value through")
     p.add_argument("--dry-run", action="store_true",
                    help="print the command and exit without running it")
+    dc.add_role_args(p)
     p.add_argument("agent_args", nargs="*", metavar="ARG",
                    help="extra arguments forwarded to the container app")
     args = p.parse_args(argv)
@@ -324,6 +340,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     # like every other argument there.)
     if args.acp and (args.shell or args.exec_cmd):
         p.error("--acp cannot be combined with --shell or --exec")
+    dc.check_role_args(p, args)
     return args
 
 
@@ -331,10 +348,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     home = Path.home()
     pwd = Path.cwd()
-    project_state = pwd / PROJECT_STATE_DIR
+    project_state = project_state_dir(pwd, args.role)
     engine = dc.resolve_engine(args.engine)
+    volume = dc.target_volume(VOLUME_PREFIX, pwd, args.role, args.shared_target)
 
-    ensure_mount_sources(home, pwd)
+    ensure_mount_sources(home, pwd, project_state)
+    # One container per role and project: two would share one role dir.
+    # Taken under --dry-run too (released at exit), so the guard is testable.
+    if args.role is not None and not args.allow_duplicate_role:
+        dc.acquire_role_lock(project_state / ".lock", args.role, "run-dsh")
 
     # ACP owns stdin/stdout: attach stdin (-i) but never allocate a TTY, even
     # when run-dsh itself was started from a terminal. `-t` turns on terminal
@@ -344,7 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd = [engine, "run", "--rm", "-i"]
     else:
         cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
-    for spec in build_mounts(home, pwd, args.selinux):
+    cmd += dc.role_labels("dsh", pwd, args.role)
+    for spec in build_mounts(home, pwd, args.selinux, volume):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
     # Project-local DSH data; the container entry uses these to apply the
@@ -361,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if dc.has_git_dir(pwd):
         project_envs.append("DSH_GIT_READ_ONLY=1")
+    if args.role is not None:
+        project_envs.append(f"AGENT_ROLE={args.role}")
     for env in build_envs(project_envs + args.env,
                           forward_searxng=engine == "podman"):
         cmd += ["-e", env]
