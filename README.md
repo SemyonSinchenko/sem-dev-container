@@ -89,6 +89,8 @@ run-claude --acp
 | `claude/managed-settings.template.json` | managed settings: initial permission mode + git-write deny rules |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
 | `tests/test_run_claude.py` | dry-run contract tests for `run-claude` TUI/ACP modes |
+| `tests/test_golden_compat.py` | golden tests: every `run-*` launcher's `--dry-run` command stays byte-identical |
+| `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port) |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
 | `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, …) plus `make test-dsh` / `make test-bins` |
 
@@ -545,6 +547,20 @@ Rebuild the image after changing anything under `claude/` or
 ```sh
 make claude
 make test-bins
+```
+
+### Golden launcher tests
+
+`make test-bins` also runs `tests/test_golden_compat.py`, which compares
+each launcher's `--dry-run` command (`run-claude`, `run-dsh`, `run-pi`,
+`run-pa`, across their modes and common flags) byte for byte with
+`tests/golden/<launcher>-<case>.txt`. Temp paths and the picked `run-dsh`
+web port are normalised, and stub `podman`/`docker` executables are put on
+`PATH`, so the tests need no container engine. Golden files change only
+deliberately, in a commit that explains why. Re-capture them with:
+
+```sh
+UPDATE_GOLDEN=1 python3 -m unittest tests.test_golden_compat
 ```
 
 ## Web search (SearXNG)
