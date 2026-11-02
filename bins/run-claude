@@ -43,7 +43,11 @@ Multi-agent runs: `--role NAME` gives the container its own session state
 (claude-target.NAME<escaped pwd>, or the legacy one with --shared-target),
 AGENT_ROLE=NAME and the labels sem.harness/sem.project/sem.role. Only one
 container per role and project runs at a time (a lock in the role dir;
---allow-duplicate-role skips it). Without these options nothing changes.
+--allow-duplicate-role skips it). `--mount ro|overlay` mounts the project
+read-only, or as a throwaway podman overlay whose changes never reach the
+host; an explicit --mount also exports AGENT_MOUNT_MODE. The session state
+over-mounts live outside the project mount, so they persist in every mode.
+Without these options nothing changes.
 See MULTI_AGENT_ROLES_PLAN.md.
 
 Script options must come before `--` or `--exec`; everything after is
@@ -135,12 +139,12 @@ def ensure_mount_sources(home: Path, pwd: Path, project_state: Path) -> None:
 
 
 def build_mounts(home: Path, pwd: Path, selinux: bool, project_state: Path,
-                 volume: str) -> list[str]:
+                 volume: str, mode: str = "rw") -> list[str]:
     """-v specs: bind mounts (host:container) + the per-project named volume."""
     z = ":z" if selinux else ""
     config_dir = f"/root/{STATE_DIR}"
     specs = [
-        f"{pwd}:{pwd}{z}",
+        dc.project_mount(pwd, mode, selinux),
         f"{home / STATE_DIR}:{config_dir}{z}",
         f"{home / AGENTS_DIR}:/root/{AGENTS_DIR}{z}",
         *dc.cache_mounts(home, z),
@@ -205,6 +209,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true",
                    help="print the command and exit without running it")
     dc.add_role_args(p)
+    dc.add_mount_args(p)
     p.add_argument("agent_args", nargs="*", metavar="ARG",
                    help="extra arguments forwarded to the container app")
     args = p.parse_args(argv)
@@ -222,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     home = Path.home()
     pwd = Path.cwd()
     engine = dc.resolve_engine(args.engine)
+    dc.check_engine_support(args, engine, "run-claude")
     project_state = project_state_dir(pwd, args.role)
     volume = dc.target_volume(VOLUME_PREFIX, pwd, args.role, args.shared_target)
 
@@ -240,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
     cmd += dc.role_labels(AGENT, pwd, args.role)
-    for spec in build_mounts(home, pwd, args.selinux, project_state, volume):
+    for spec in build_mounts(home, pwd, args.selinux, project_state, volume,
+                             dc.mount_mode(args)):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
     # CLAUDE_PROJECT_HOME tells claude-acp-entry that the per-project
@@ -256,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         project_envs.append("CLAUDE_GIT_READ_ONLY=1")
     if args.role is not None:
         project_envs.append(f"AGENT_ROLE={args.role}")
+    project_envs += dc.mount_envs(args)
     for env in build_envs(project_envs + args.env,
                           forward_searxng=engine == "podman"):
         cmd += ["-e", env]

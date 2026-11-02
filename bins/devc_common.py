@@ -194,3 +194,48 @@ def acquire_role_lock(lock_path: Path, role: str, prog: str) -> int:
         sys.exit(EXIT_ROLE_BUSY)
     os.set_inheritable(fd, True)
     return fd
+
+
+# How the project dir is mounted. rw is today's behaviour; ro makes every
+# project write fail; overlay (podman `:O`) lets the agent edit, build and
+# test, but discards every project change when the container stops.
+MOUNT_MODES = ("rw", "ro", "overlay")
+
+
+def add_mount_args(parser: argparse.ArgumentParser) -> None:
+    """Register --mount. Its default is None so an explicit `--mount rw` can
+    be told apart from no flag (only the former exports AGENT_MOUNT_MODE)."""
+    parser.add_argument("--mount", choices=MOUNT_MODES, metavar="MODE",
+                        help="how the project dir is mounted: rw (default), ro, "
+                             "or overlay (throwaway writes; podman only)")
+
+
+def mount_mode(args: argparse.Namespace) -> str:
+    """Effective mount mode (rw when --mount was not given)."""
+    return args.mount or "rw"
+
+
+def check_engine_support(args: argparse.Namespace, engine: str, prog: str) -> None:
+    """Exit 2 for options the resolved engine cannot honour. Never fall back."""
+    if mount_mode(args) == "overlay" and engine != "podman":
+        print(f"{prog}: error: --mount overlay needs podman "
+              f"({engine} has no :O overlay mounts)", file=sys.stderr)
+        sys.exit(2)
+
+
+def project_mount(pwd: Path, mode: str, selinux: bool) -> str:
+    """-v spec for the project dir itself (always the first -v).
+
+    podman rejects :O combined with :z, and the §4 spike showed :O works on
+    never-labelled projects, so overlay carries no SELinux suffix.
+    """
+    if mode == "overlay":
+        return f"{pwd}:{pwd}:O"
+    if mode == "ro":
+        return f"{pwd}:{pwd}:{'ro,z' if selinux else 'ro'}"
+    return f"{pwd}:{pwd}{':z' if selinux else ''}"
+
+
+def mount_envs(args: argparse.Namespace) -> list[str]:
+    """AGENT_MOUNT_MODE, only when --mount was given explicitly."""
+    return [] if args.mount is None else [f"AGENT_MOUNT_MODE={args.mount}"]
