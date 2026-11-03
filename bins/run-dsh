@@ -70,7 +70,8 @@ overlay whose changes never reach the host; the DSH project data dir is then
 bind-mounted rw on top, so sessions still persist. An explicit --mount also
 exports AGENT_MOUNT_MODE. `--outbox DIR` bind-mounts one project subdir rw at
 the same path on top (the place for results under ro/overlay) and exports
-AGENT_OUTBOX. Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
+AGENT_OUTBOX. `--label KEY=VALUE`, `--name NAME` and `--timeout SECONDS`
+(podman only; exit 255 on expiry) are passed to the engine. Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
 
 Script options must come before `--` or `--exec`; everything after is
 container-side.
@@ -348,6 +349,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     dc.add_role_args(p)
     dc.add_mount_args(p)
     dc.add_outbox_args(p)
+    dc.add_identity_args(p)
     p.add_argument("agent_args", nargs="*", metavar="ARG",
                    help="extra arguments forwarded to the container app")
     args = p.parse_args(argv)
@@ -385,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd = [engine, "run", "--rm", "-i"]
     else:
         cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
-    cmd += dc.role_labels("dsh", pwd, args.role)
+    cmd += dc.engine_run_options("dsh", pwd, args)
     for spec in build_mounts(home, pwd, args.selinux, volume, project_state,
                              dc.mount_mode(args), outbox):
         cmd += ["-v", spec]

@@ -221,6 +221,10 @@ def check_engine_support(args: argparse.Namespace, engine: str, prog: str) -> No
         print(f"{prog}: error: --mount overlay needs podman "
               f"({engine} has no :O overlay mounts)", file=sys.stderr)
         sys.exit(2)
+    if getattr(args, "timeout", None) is not None and engine != "podman":
+        print(f"{prog}: error: --timeout needs podman "
+              f"({engine} run has no --timeout)", file=sys.stderr)
+        sys.exit(2)
 
 
 def project_mount(pwd: Path, mode: str, selinux: bool) -> str:
@@ -300,3 +304,68 @@ def outbox_mount(out: Path | None, selinux: bool) -> list[str]:
 def outbox_envs(out: Path | None) -> list[str]:
     """AGENT_OUTBOX, only when --outbox was given."""
     return [] if out is None else [f"AGENT_OUTBOX={out}"]
+
+
+# Label keys accepted by --label (podman/docker accept more; this keeps keys
+# predictable for `podman ps --filter label=...`).
+LABEL_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+def label_spec(value: str) -> str:
+    """argparse type for --label KEY=VALUE."""
+    key, sep, _ = value.partition("=")
+    if not sep:
+        raise argparse.ArgumentTypeError(f"invalid label {value!r}: expected KEY=VALUE")
+    if not LABEL_KEY_RE.match(key):
+        raise argparse.ArgumentTypeError(
+            f"invalid label key {key!r}: use lowercase letters, digits, '.', '_' "
+            "or '-', starting with a letter or digit")
+    return value
+
+
+def positive_seconds(value: str) -> int:
+    """argparse type for --timeout SECONDS."""
+    try:
+        seconds = int(value, 10)
+    except ValueError:
+        seconds = 0
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid timeout {value!r}: expected a positive number of seconds")
+    return seconds
+
+
+def add_identity_args(parser: argparse.ArgumentParser) -> None:
+    """Register --label, --name and --timeout."""
+    parser.add_argument("--label", action="append", default=[], type=label_spec,
+                        metavar="KEY=VALUE",
+                        help="container label (repeatable); overrides an automatic "
+                             "sem.* label with the same key")
+    parser.add_argument("--name", metavar="NAME",
+                        help="container name (the engine rejects a name in use)")
+    parser.add_argument("--timeout", type=positive_seconds, metavar="SECONDS",
+                        help="hard stop: the engine kills the container after SECONDS "
+                             "(podman only; `podman run` then exits 255)")
+
+
+def engine_run_options(harness: str, pwd: Path, args: argparse.Namespace) -> list[str]:
+    """Options placed right after `run --rm -i/-it`: labels, --name, --timeout.
+
+    Automatic role labels come first, then --label in the given order. A user
+    label replaces an automatic one with the same key, so only the user's is
+    emitted. Empty without the multi-agent options.
+    """
+    user = getattr(args, "label", [])
+    user_keys = {spec.partition("=")[0] for spec in user}
+    auto = role_labels(harness, pwd, getattr(args, "role", None))
+    opts = []
+    for flag, spec in zip(auto[::2], auto[1::2]):
+        if spec.partition("=")[0] not in user_keys:
+            opts += [flag, spec]
+    for spec in user:
+        opts += ["--label", spec]
+    if getattr(args, "name", None) is not None:
+        opts += ["--name", args.name]
+    if getattr(args, "timeout", None) is not None:
+        opts += ["--timeout", str(args.timeout)]
+    return opts
