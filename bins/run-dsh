@@ -68,7 +68,9 @@ runs at a time (a lock in the role dir; --allow-duplicate-role skips it).
 `--mount ro|overlay` mounts the project read-only, or as a throwaway podman
 overlay whose changes never reach the host; the DSH project data dir is then
 bind-mounted rw on top, so sessions still persist. An explicit --mount also
-exports AGENT_MOUNT_MODE. Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
+exports AGENT_MOUNT_MODE. `--outbox DIR` bind-mounts one project subdir rw at
+the same path on top (the place for results under ro/overlay) and exports
+AGENT_OUTBOX. Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
 
 Script options must come before `--` or `--exec`; everything after is
 container-side.
@@ -159,7 +161,8 @@ def ensure_mount_sources(home: Path, pwd: Path, project_state: Path) -> None:
 
 
 def build_mounts(home: Path, pwd: Path, selinux: bool, volume: str,
-                 project_state: Path, mode: str = "rw") -> list[str]:
+                 project_state: Path, mode: str = "rw",
+                 outbox: Path | None = None) -> list[str]:
     """-v specs: bind mounts (host:container) + the per-project named volume."""
     z = ":z" if selinux else ""
     specs = [
@@ -173,9 +176,11 @@ def build_mounts(home: Path, pwd: Path, selinux: bool, volume: str,
     # dir (<project>/.dsh or its role dir) rw at the same path on top.
     if mode != "rw":
         specs.append(f"{project_state}:{project_state}{z}")
-    # Re-mount .git read-only over the rw project mount above (a later -v
+    # Re-mount .git read-only over the project mount above (a later -v
     # entry wins; see dsh/dev-container.mjs): commits belong on the host.
     specs += dc.git_ro_mount(pwd, selinux)
+    # The outbox stays writable and persistent whatever the project mode.
+    specs += dc.outbox_mount(outbox, selinux)
     # Named (docker-managed) volume, one per host project dir, so builds the
     # dsh agent runs in the workspace keep their target dir across runs.
     specs.append(f"{volume}:/target")
@@ -342,6 +347,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="print the command and exit without running it")
     dc.add_role_args(p)
     dc.add_mount_args(p)
+    dc.add_outbox_args(p)
     p.add_argument("agent_args", nargs="*", metavar="ARG",
                    help="extra arguments forwarded to the container app")
     args = p.parse_args(argv)
@@ -361,9 +367,11 @@ def main(argv: list[str] | None = None) -> int:
     project_state = project_state_dir(pwd, args.role)
     engine = dc.resolve_engine(args.engine)
     dc.check_engine_support(args, engine, "run-dsh")
+    outbox = dc.resolve_outbox(pwd, args.outbox, "run-dsh")
     volume = dc.target_volume(VOLUME_PREFIX, pwd, args.role, args.shared_target)
 
     ensure_mount_sources(home, pwd, project_state)
+    dc.ensure_outbox(outbox)
     # One container per role and project: two would share one role dir.
     # Taken under --dry-run too (released at exit), so the guard is testable.
     if args.role is not None and not args.allow_duplicate_role:
@@ -379,7 +387,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
     cmd += dc.role_labels("dsh", pwd, args.role)
     for spec in build_mounts(home, pwd, args.selinux, volume, project_state,
-                             dc.mount_mode(args)):
+                             dc.mount_mode(args), outbox):
         cmd += ["-v", spec]
     cmd += ["-w", str(pwd)]
     # Project-local DSH data; the container entry uses these to apply the
@@ -399,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.role is not None:
         project_envs.append(f"AGENT_ROLE={args.role}")
     project_envs += dc.mount_envs(args)
+    project_envs += dc.outbox_envs(outbox)
     for env in build_envs(project_envs + args.env,
                           forward_searxng=engine == "podman"):
         cmd += ["-e", env]

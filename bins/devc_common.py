@@ -239,3 +239,64 @@ def project_mount(pwd: Path, mode: str, selinux: bool) -> str:
 def mount_envs(args: argparse.Namespace) -> list[str]:
     """AGENT_MOUNT_MODE, only when --mount was given explicitly."""
     return [] if args.mount is None else [f"AGENT_MOUNT_MODE={args.mount}"]
+
+
+# Project subdirs an outbox must never be inside: git state (mounted
+# read-only) and the launchers' own per-project session state.
+OUTBOX_FORBIDDEN = (".git", ".claude-container", ".dsh")
+
+
+def add_outbox_args(parser: argparse.ArgumentParser) -> None:
+    """Register --outbox."""
+    parser.add_argument("--outbox", metavar="PATH",
+                        help="directory inside the project (relative to it, or "
+                             "absolute) bind-mounted rw at the same path on top of "
+                             "the project mount: the one persistent writable place "
+                             "under ro/overlay; exported as AGENT_OUTBOX")
+
+
+def resolve_outbox(pwd: Path, value: str | None, prog: str) -> Path | None:
+    """Canonical outbox path, or exit 2 if it is not a safe dir in the project.
+
+    Resolving first makes a symlink that points outside the project fail the
+    containment check like any other outside path.
+    """
+    if value is None:
+        return None
+
+    def reject(reason: str) -> None:
+        print(f"{prog}: error: --outbox {value}: {reason}", file=sys.stderr)
+        sys.exit(2)
+
+    out = (pwd / value).resolve()
+    if out == pwd:
+        reject("must be a directory inside the project, not the project itself")
+    if pwd not in out.parents:
+        reject(f"resolves to {out}, outside the project {pwd}")
+    for name in OUTBOX_FORBIDDEN:
+        forbidden = pwd / name
+        if out == forbidden or forbidden in out.parents:
+            reject(f"must not be inside {forbidden}")
+    if out.exists() and not out.is_dir():
+        reject(f"{out} exists and is not a directory")
+    return out
+
+
+def ensure_outbox(out: Path | None) -> None:
+    """Create the outbox on the host (podman refuses to create bind sources).
+    Its contents are never touched: the orchestrator owns them."""
+    if out is not None:
+        out.mkdir(parents=True, exist_ok=True)
+
+
+def outbox_mount(out: Path | None, selinux: bool) -> list[str]:
+    """-v spec for the outbox: rw at the same absolute path. Mounted in every
+    mode when given (redundant but harmless under rw)."""
+    if out is None:
+        return []
+    return [f"{out}:{out}{':z' if selinux else ''}"]
+
+
+def outbox_envs(out: Path | None) -> list[str]:
+    """AGENT_OUTBOX, only when --outbox was given."""
+    return [] if out is None else [f"AGENT_OUTBOX={out}"]
