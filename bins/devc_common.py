@@ -6,9 +6,9 @@ their real (symlink-resolved) path, so installing them as symlinks into
 
 Only mechanics that are identical across launchers live here: engine
 resolution, the cache bind mounts, the read-only .git remount, the /target
-volume name, the env merge, and the multi-agent options (roles; see
-MULTI_AGENT_ROLES_PLAN.md). Harness-specific parts (state mounts,
-passthrough key lists, ports, entries) stay in the scripts.
+volume name, the env merge, and the multi-agent options (README: "Roles and
+capability profiles"). Harness-specific parts (state mounts, passthrough key
+lists, ports, entries) stay in the scripts.
 
 The multi-agent options are opaque capabilities: a role name is only used
 for paths, volume names and labels. Without them every launcher behaves

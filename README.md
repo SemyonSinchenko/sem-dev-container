@@ -70,7 +70,7 @@ run-claude --acp
 | `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
 | `bins/run-claude`      | run the `dev-claude` container: the `claude` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.claude-container` |
 | `bins/run-check`       | run a deterministic check (tests, lint) in `dev-shared`: no agent, no credentials, throwaway overlay of the project by default; exit status is the check's |
-| `bins/devc_common.py`  | helpers shared by the `run-*` launchers (engine, cache mounts, `.git` ro remount, `/target` volume, env merge); found next to the symlink-resolved script |
+| `bins/devc_common.py`  | helpers shared by the `run-*` launchers (engine, cache mounts, `.git` ro remount, `/target` volume, env merge, the multi-agent options); found next to the symlink-resolved script |
 | `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
 | `dsh/dsh-web-entry`    | container-side web wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
 | `dsh/dsh-acp-entry`    | container-side ACP wrapper: foreground stdio, quiet profile preflight, execs `dsh --profile acp` |
@@ -86,7 +86,7 @@ run-claude --acp
 | `dsh/dev-container.test.mjs` | unit tests for the policy parser and prompt text |
 | `dsh/acp-commands.test.mjs` | unit tests for the ACP tap plus an upstream `dsh-acp` stream canary |
 | `claude/Dockerfile`    | `FROM dev-shared` + Claude Code CLI + `claude-agent-acp` adapter (npm) + container policy |
-| `claude/claude-dev-entry` | image ENTRYPOINT: renders the managed settings from `CLAUDE_PERMISSION_MODE`, then execs its arguments |
+| `claude/claude-dev-entry` | image ENTRYPOINT: renders the managed settings from `CLAUDE_PERMISSION_MODE`, adds a "This run" section to `CLAUDE.md` for multi-agent runs, then execs its arguments |
 | `claude/claude-acp-entry` | container-side ACP wrapper: checks the per-project mounts, execs `claude-agent-acp` |
 | `claude/managed-settings.template.json` | managed settings: initial permission mode + git-write deny rules |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
@@ -94,7 +94,12 @@ run-claude --acp
 | `tests/test_devc_common.py` | unit tests for `devc_common` plus the symlinked/copied launcher install check |
 | `tests/test_golden_compat.py` | golden tests: every `run-*` launcher's `--dry-run` command stays byte-identical |
 | `tests/test_run_check.py` | tests for `run-check`: mounts, no credentials, `--target-from`, exit status |
-| `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port) |
+| `tests/test_roles.py` | `--role`: per-role state and volumes, labels, the role lock |
+| `tests/test_mount_modes.py` | `--mount rw\|ro\|overlay`: mount specs, DSH state bind, docker refusal |
+| `tests/test_outbox.py` | `--outbox`: validation, creation, mount order |
+| `tests/test_identity.py` | `--label`, `--name`, `--timeout` |
+| `tests/test_claude_entry.py` | `claude-dev-entry`: `CLAUDE.md` untouched by default, "This run" section, no stdout |
+| `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port), plus snapshots of the default DSH environment text |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
 | `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, …) plus `make test-dsh` / `make test-bins` |
 
@@ -600,6 +605,178 @@ deliberately, in a commit that explains why. Re-capture them with:
 UPDATE_GOLDEN=1 python3 -m unittest tests.test_golden_compat
 ```
 
+## Roles and capability profiles (multi-agent)
+
+Multi-agent loops (implementer + reviewer, designer + critic, …) are driven
+by an external orchestrator that starts one container per agent. The
+launchers only provide **capabilities and runtime facts**: separate state
+per role, how the project is mounted, one writable outbox, honest prompt
+text, labels and time bounds, and credential-free checks (`run-check`).
+They know nothing about what a "reviewer" is: role names are opaque
+strings used for paths, volumes and labels. Personas, prompts and verdicts
+live in the orchestrator.
+
+**Without any of the options below, every launcher behaves exactly as
+before**: same command, mounts, env, prompt text and on-disk layout
+(enforced by `tests/test_golden_compat.py`).
+
+### Options
+
+`run-claude`, `run-dsh` and `run-check`:
+
+| Option | Values | Default | Effect |
+|---|---|---|---|
+| `--role NAME` | `^[a-z][a-z0-9-]{0,31}$` | none (legacy layout) | per-role session state + per-role `/target` volume + `AGENT_ROLE` + `sem.*` labels |
+| `--shared-target` | flag | off | with `--role`: keep the project's legacy `/target` volume |
+| `--allow-duplicate-role` | flag | off | with `--role`: skip the one-container-per-role lock (not in `run-check`) |
+| `--mount MODE` | `rw` \| `ro` \| `overlay` | `rw` (`overlay` for `run-check`) | how the project dir is mounted |
+| `--outbox PATH` | dir inside the project | none | rw bind of that dir at the same path on top of the project mount; `AGENT_OUTBOX` |
+| `--label KEY=VALUE` | repeatable; key `^[a-z0-9][a-z0-9._-]*$` | none | `podman run --label` |
+| `--name NAME` | string | none | `podman run --name` |
+| `--timeout SECONDS` | positive integer | none | `podman run --timeout` (podman only) |
+
+`run-check` only: `--offline` (`--network none`) and `--target-from
+claude|dsh` (see [Deterministic checks](#deterministic-checks-binsrun-check)).
+
+Env vars inside the container, set only when the matching option is given
+(`run-check` always sets `AGENT_MOUNT_MODE`):
+
+| Var | Set by | Meaning |
+|---|---|---|
+| `AGENT_ROLE` | `--role` | the role name (informational) |
+| `AGENT_MOUNT_MODE` | `--mount` (even `--mount rw`) | `rw` / `ro` / `overlay` |
+| `AGENT_OUTBOX` | `--outbox` | absolute outbox path (same on host and in container) |
+
+Examples:
+
+```sh
+# implementer: today's behaviour plus its own state and target
+run-claude --acp --role impl --label sem.instance=chg-17
+
+# reviewer: throwaway project view, one writable outbox, 30-minute cap
+run-dsh --acp --role review --mount overlay \
+        --outbox .loop/chg-17 --label sem.instance=chg-17 --timeout 1800
+
+# check: no agent, no credentials, exit status is the verdict
+run-check --outbox .loop/chg-17 --role impl --target-from claude -- make test
+
+# find the reviewer while it runs
+podman ps --filter label=sem.role=review --filter label=sem.instance=chg-17
+```
+
+A **role is a stable slot** (`impl`, `review`, `critic`), not a per-run
+instance: each role gets a permanent state dir and `/target` volume, so a
+role per run (`review-chg17`) would pile them up. Put instance IDs in
+`--label`.
+
+### State, volumes and the role lock
+
+With `--role NAME` the per-session state moves into a role dir; without it,
+nothing moves and existing sessions stay resumable:
+
+```text
+<project>/.claude-container/            # legacy run-claude state (no --role)
+<project>/.claude-container/roles/NAME/ # run-claude --role NAME: projects/, sessions/, …, history.jsonl
+<project>/.dsh/                         # legacy run-dsh state (no --role)
+<project>/.dsh/roles/NAME/              # run-dsh --role NAME: sessions/, storages/, …
+```
+
+`CLAUDE_PROJECT_HOME` / `DSH_PROJECT_HOME` (and DSH's sessions/storages
+vars) point at the role dir; the DSH workspace stays the project.
+
+`/target` volumes: `<prefix><escaped pwd>` without a role (unchanged),
+`<prefix>.<role><escaped pwd>` with one, e.g.
+`claude-target.review_home_me_proj`. Prefixes: `claude-target`,
+`dsh-target`, `check-target`. Role names contain neither `.` nor `_`, so no
+project/role pair can produce another pair's name. `--shared-target` keeps
+the legacy volume when two roles should share build output on purpose.
+
+**One container per role and project.** `run-claude` and `run-dsh` take an
+exclusive `flock` on `<role dir>/.lock` and hold it for the life of the
+container (the lock fd survives the `exec` into podman). A second launch of
+the same role on the same project exits **2** with `role NAME is already
+running for this project`; other roles and the legacy layout are not
+affected. The kernel drops the lock when the container client exits, also
+after `--timeout`, `podman stop` or a crash, so there is nothing to clean
+up. `--allow-duplicate-role` skips it. `run-check` takes no lock.
+
+### Mount modes
+
+| Mode | Project mount | Agent edits under the project | What persists in the project |
+|---|---|---|---|
+| `rw` (default) | `{pwd}:{pwd}:z` | real host files | everything |
+| `ro` | `{pwd}:{pwd}:ro,z` | fail with `Read-only file system` | the outbox, DSH state |
+| `overlay` | `{pwd}:{pwd}:O` (podman only) | work, then are discarded at container exit | the outbox, DSH state |
+
+- The read-only `.git` remount applies in every mode.
+- `overlay` with docker (explicit or picked by `--engine auto`) is an error;
+  there is no silent fallback to `rw`.
+- DSH keeps its project data inside the project, so under `ro`/`overlay`
+  `run-dsh` bind-mounts `<project>/.dsh` (or the role dir) rw on top, and
+  sessions persist. Claude's state mounts target `/root/.claude`, outside
+  the project, and persist in every mode.
+- An overlay is **not a snapshot**: host changes to files the container
+  hasn't touched show up inside. Start an `overlay` container only after
+  `rw` writers on the same project have finished, and keep it to one step.
+  The orchestrator has to enforce this; the launcher can't.
+- `-v` order: project, shared harness state / `~/.agents` / caches, Claude
+  state over-mounts, DSH state bind (`ro`/`overlay`), `.git`, outbox,
+  `/target`.
+
+### Outbox
+
+`--outbox PATH` (relative to the project, or absolute) is resolved first,
+so a symlink that leads outside the project is rejected like any outside
+path. It must be strictly inside the project and not inside `.git`,
+`.claude-container` or `.dsh`; otherwise the launcher exits 2. It is
+created on the host before launch (also with `--dry-run`), mounted rw at the
+same absolute path in every mode, and its contents are never touched: the
+orchestrator owns them. Target projects should gitignore the outbox root
+(e.g. `.loop/`) unless the results are meant to be committed.
+
+### What the agent is told
+
+The prompt text changes only when the `AGENT_*` vars are set:
+
+- **Claude:** `claude-dev-entry` rewrites `/etc/claude-code/CLAUDE.md` as
+  the image's base copy (`/usr/local/share/claude/CLAUDE.base.md`) plus a
+  short "This run" section: the role, a read-only or throwaway-overlay
+  project, and the outbox as the place for results. Without the vars the
+  file is left as shipped, so an old launcher with a new image behaves as
+  before.
+- **DSH:** the `dev-container` plugin's environment context replaces the
+  "files you edit are real host files and persist" paragraph for `ro` and
+  `overlay`, drops the "Destructive edits" paragraph there, adds an outbox
+  paragraph and a `Role for this run:` line. The default text is
+  snapshot-tested (`tests/golden/dsh-environment-*.txt`).
+
+Rebuild the images (`make claude dsh`) after changing either.
+
+### Time bounds and exit codes
+
+`--timeout N` makes podman kill the container after N seconds; `podman run`
+(and so the launcher) then exits **255**, also in ACP mode with stdin held
+open. A command that itself exits 255 looks the same, so an orchestrator
+that must be certain also compares the elapsed time. `podman stop` that
+escalates to SIGKILL gives 137. Launcher-side errors (invalid options, a
+busy role, a rejected outbox, an option the engine can't honour) exit 2
+before anything starts.
+
+### Known limits
+
+- **Network:** agents always need model-API egress; per-role isolation would
+  need an egress proxy with an allowlist. Only `run-check --offline` gets
+  `--network none`.
+- **Shared Claude home:** parallel Claude containers share `~/.claude`.
+  Concurrent OAuth refreshes may race on `.credentials.json` (the first
+  suspect for unexplained logouts), and every role on one project reads and
+  rewrites the same `.claude.json` project entry (trust, onboarding,
+  last-session bookkeeping). Transcripts are per role and unaffected.
+- **Docker:** no `overlay` and no `--timeout`; those combinations error out.
+- **`run-pi` / `run-pa`:** no roles or mount modes yet.
+- **Abbreviations:** the new options make some argparse abbreviations
+  ambiguous (`--s`/`--sh`, `--n`, `--a`); full option names all still work.
+
 ## Web search (SearXNG)
 
 The host runs SearXNG 24/7 (quadlet
@@ -682,9 +859,9 @@ a host-reachable address in the quadlet (`PublishPort=`) and run with
   own IP and `run-dsh` publishes the port on `127.0.0.1` only — dsh-emacs and
   the browser are expected on the same machine. ACP mode publishes nothing;
   its client speaks over stdin/stdout.
-- **Podman behaviour the multi-agent mount modes rely on** (spike for
-  `MULTI_AGENT_ROLES_PLAN.md` §4; podman 5.8.9, rootless, Fedora, SELinux
-  enforcing, 2026-11-02):
+- **Podman behaviour the multi-agent mount modes rely on** (checked on
+  podman 5.8.9, rootless, Fedora, SELinux enforcing, 2026-11-02; see
+  [Roles and capability profiles](#roles-and-capability-profiles-multi-agent)):
   - `:O` (overlay) works on a project never labelled for containers
     (`cache_home_t`) as well as on one labelled by an earlier `:z` run, so
     no relabel preflight is needed. podman rejects `:O,z` ("can only

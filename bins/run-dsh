@@ -59,19 +59,23 @@ Examples:
   run-dsh --engine docker       # use docker instead of podman
   run-dsh --dry-run             # print the command instead of running it
 
-Multi-agent runs: `--role NAME` gives the container its own DSH project
-data (<project>/.dsh/roles/NAME; the workspace stays the project), its own
-/target volume (dsh-target.NAME<escaped pwd>, or the legacy one with
---shared-target), AGENT_ROLE=NAME and the labels
-sem.harness/sem.project/sem.role. Only one container per role and project
-runs at a time (a lock in the role dir; --allow-duplicate-role skips it).
-`--mount ro|overlay` mounts the project read-only, or as a throwaway podman
-overlay whose changes never reach the host; the DSH project data dir is then
-bind-mounted rw on top, so sessions still persist. An explicit --mount also
-exports AGENT_MOUNT_MODE. `--outbox DIR` bind-mounts one project subdir rw at
-the same path on top (the place for results under ro/overlay) and exports
-AGENT_OUTBOX. `--label KEY=VALUE`, `--name NAME` and `--timeout SECONDS`
-(podman only; exit 255 on expiry) are passed to the engine. Without these options nothing changes. See MULTI_AGENT_ROLES_PLAN.md.
+Multi-agent runs (README: "Roles and capability profiles"):
+  --role NAME        own DSH project data (<project>/.dsh/roles/NAME; the
+                     workspace stays the project), own /target volume
+                     (dsh-target.NAME<escaped pwd>; --shared-target keeps the
+                     legacy one), AGENT_ROLE and the
+                     sem.harness/sem.project/sem.role labels. One container per
+                     role and project at a time (a lock in the role dir;
+                     --allow-duplicate-role skips it).
+  --mount ro|overlay project read-only, or a throwaway podman overlay whose
+                     changes never reach the host. The DSH project data dir is
+                     then bind-mounted rw on top, so sessions still persist.
+                     An explicit --mount exports AGENT_MOUNT_MODE.
+  --outbox DIR       one project subdir bind-mounted rw on top: where results
+                     go under ro/overlay; exported as AGENT_OUTBOX.
+  --label KEY=VALUE, --name NAME, --timeout SECONDS (podman only; exit 255
+                     on expiry) are passed to the engine.
+Without these options nothing changes.
 
 Script options must come before `--` or `--exec`; everything after is
 container-side.

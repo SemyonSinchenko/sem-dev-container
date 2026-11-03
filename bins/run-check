@@ -37,7 +37,7 @@ Examples:
   run-check --dry-run -- make test             # print the command
 
 Script options must come before `--` or `--exec`; everything after is
-container-side. See MULTI_AGENT_ROLES_PLAN.md §9.
+container-side. See README: "Deterministic checks: bins/run-check".
 """
 
 from __future__ import annotations
