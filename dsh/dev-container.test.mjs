@@ -2,6 +2,7 @@
 // Run with: node --test dsh/dev-container.test.mjs
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -202,13 +203,104 @@ test("containerFacts reads the launcher environment with safe fallbacks", () => 
       CARGO_TARGET_DIR: "/target",
       DSH_GIT_READ_ONLY: "1",
     }),
-    { project: "/work/proj", target: "/target", gitReadOnly: true },
+    {
+      project: "/work/proj",
+      target: "/target",
+      gitReadOnly: true,
+      mountMode: "rw",
+      outbox: undefined,
+      role: undefined,
+    },
   );
   assert.deepEqual(containerFacts({}), {
     project: "the session workspace",
     target: "/target",
     gitReadOnly: false,
+    mountMode: "rw",
+    outbox: undefined,
+    role: undefined,
   });
+});
+
+test("containerFacts reads the multi-agent variables", () => {
+  const facts = containerFacts({
+    DSH_PROJECT_DIR: "/p",
+    AGENT_MOUNT_MODE: "overlay",
+    AGENT_OUTBOX: "/p/.loop/t1",
+    AGENT_ROLE: "review",
+  });
+  assert.equal(facts.mountMode, "overlay");
+  assert.equal(facts.outbox, "/p/.loop/t1");
+  assert.equal(facts.role, "review");
+  assert.equal(containerFacts({ AGENT_MOUNT_MODE: "ro" }).mountMode, "ro");
+  // Unknown or empty values fall back to the defaults.
+  assert.equal(containerFacts({ AGENT_MOUNT_MODE: "tmpfs" }).mountMode, "rw");
+  assert.equal(containerFacts({ AGENT_OUTBOX: " " }).outbox, undefined);
+  assert.equal(containerFacts({ AGENT_ROLE: "" }).role, undefined);
+});
+
+// Captured from the pre-multi-agent plugin; the default text must not change.
+const snapshot = (name) =>
+  readFileSync(new URL(`../tests/golden/${name}`, import.meta.url), "utf8");
+
+test("renderEnvironment keeps the default text byte-identical", () => {
+  assert.equal(renderEnvironment(containerFacts({})), snapshot("dsh-environment-empty.txt"));
+  const runDsh = {
+    DSH_PROJECT_DIR: "/work/proj",
+    CARGO_TARGET_DIR: "/target",
+    DSH_GIT_READ_ONLY: "1",
+    DSH_DEV_CONTAINER: "1",
+    DSH_PROJECT_HOME: "/work/proj/.dsh",
+  };
+  assert.equal(renderEnvironment(containerFacts(runDsh)), snapshot("dsh-environment-run-dsh.txt"));
+  // An explicit --mount rw changes nothing either.
+  assert.equal(
+    renderEnvironment(containerFacts({ ...runDsh, AGENT_MOUNT_MODE: "rw" })),
+    snapshot("dsh-environment-run-dsh.txt"),
+  );
+  // Facts objects from before mountMode existed still render the same.
+  assert.equal(
+    renderEnvironment({ project: "/work/proj", target: "/target", gitReadOnly: true }),
+    snapshot("dsh-environment-run-dsh.txt"),
+  );
+});
+
+test("renderEnvironment describes ro, overlay, outbox and role runs", () => {
+  const base = { DSH_PROJECT_DIR: "/p", DSH_GIT_READ_ONLY: "1" };
+  const render = (env) => renderEnvironment(containerFacts({ ...base, ...env }));
+  const rw = render({});
+
+  const ro = render({ AGENT_MOUNT_MODE: "ro" });
+  assert.match(ro, /`\/p`\) is mounted read-only for this run/);
+  assert.match(ro, /fails with `Read-only file system`/);
+  assert.doesNotMatch(ro, /real host files and persist/);
+  assert.doesNotMatch(ro, /Destructive edits/);
+  assert.doesNotMatch(ro, /The project, `\/target`/);
+
+  const overlay = render({ AGENT_MOUNT_MODE: "overlay" });
+  assert.match(overlay, /throwaway overlay/);
+  assert.match(overlay, /discarded when the container stops and never reaches the host/);
+  assert.doesNotMatch(overlay, /real host files and persist/);
+  assert.doesNotMatch(overlay, /Destructive edits/);
+
+  const outboxOverlay = render({ AGENT_MOUNT_MODE: "overlay", AGENT_OUTBOX: "/p/.loop/t1" });
+  assert.match(outboxOverlay, /Outbox: `\/p\/\.loop\/t1` is bind-mounted read-write/);
+  assert.match(outboxOverlay, /only location under the project whose changes persist/);
+  const outboxRw = render({ AGENT_OUTBOX: "/p/.loop/t1" });
+  assert.match(outboxRw, /Outbox: `\/p\/\.loop\/t1`/);
+  assert.doesNotMatch(outboxRw, /only location/); // the whole project persists under rw
+  assert.match(outboxRw, /Destructive edits/);
+
+  const role = render({ AGENT_ROLE: "review" });
+  assert.match(role, /^Container environment:.*\n\nRole for this run: review\.\n\nAccess policy:/);
+  assert.equal(role.replace("\n\nRole for this run: review.", ""), rw);
+
+  // The access policy and the git rules never change.
+  for (const text of [ro, overlay, outboxOverlay, role]) {
+    assert.match(text, /no action needs prior permission/);
+    assert.match(text, /`\.git` is mounted read-only/);
+    assert.doesNotMatch(text, /\{\{|undefined/);
+  }
 });
 
 test("renderEnvironment states the mounts, root access and target rule", () => {

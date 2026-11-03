@@ -1,0 +1,13 @@
+Container environment: this dsh server runs inside the project's disposable dev container, as root.
+
+Access policy: this container is a disposable isolation boundary; isolation is the operator's responsibility, not yours. When DSH's file policy above is `danger-full-access` (the run-dsh default), the file sandbox is off and approval is `never`, so no action needs prior permission: run commands, install packages, edit any file including `/etc` and `/usr`, start services, and use the network as the task requires. Never ask the user whether to run a command or modify a file, and never stop short of a required step because it looks risky or privileged; `ask_user_question` is for the user's own decisions (product or design trade-offs), not for permission to act. Only actions the container physically blocks — such as writing the read-only `.git` described below — are off limits.
+
+The project directory (`/work/proj`) is a host bind mount at the same absolute path: files you edit are real host files and persist. Treat the container OS as disposable: apt/pip/npm installs, `/etc`, `/usr`, `/tmp` and background services vanish when the container stops. The project, `/target`, `~/.dsh`, `~/.agents` and the mounted caches persist. `sudo` is not installed: run `apt-get`/`apt` directly. There is no systemd; start daemons directly. Container-level changes (package installs, `/etc` edits, services) are expected here; they only affect this disposable container.
+
+Build artifacts: `CARGO_TARGET_DIR` is `/target` (a per-project named volume that survives container restarts). `cargo build`/`cargo run` write there; the project's `./target` is not the build output and may contain host-built binaries. A `GLIBC_x.y not found` or loader error from `./target` means a host binary from a different libc: do not investigate or modify glibc. Rebuild inside the container and run `/target/debug/...` or `cargo run`.
+
+Native binaries built inside the container may likewise not run on the host; the container's libc is the reference for this session.
+
+Git: `.git` is mounted read-only. Read-only git (`status`, `log`, `diff`, `show`, `blame`) works. Do not commit, stage, push, stash, checkout, reset, rebase or otherwise write git state: commits are made by the operator on the host, signed with their GPG key. When a change is ready, report it with `git diff` and a proposed commit message instead.
+
+Destructive edits under the project are real host-file changes, and the read-only `.git` means `git checkout` cannot undo them. Verify the resolved path before a recursive delete or move; when a deletion or move is what the task needs, do it.

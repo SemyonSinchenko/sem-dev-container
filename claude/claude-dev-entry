@@ -12,13 +12,24 @@
 # launcher's value is what new sessions start in; switching modes inside a
 # session still works.
 #
+# Multi-agent runs (bins/run-claude --role/--mount/--outbox export AGENT_ROLE,
+# AGENT_MOUNT_MODE, AGENT_OUTBOX): when any of them says something the image's
+# managed CLAUDE.md doesn't, CLAUDE.md is rewritten as the pristine base copy
+# plus a short "This run" section, so the agent is told the truth about a
+# read-only or throwaway project mount and where results go. Without them
+# CLAUDE.md is left exactly as the image ships it.
+#
 # Never write to stdout: this script also fronts the ACP stdio server, where
 # every stdout byte must be an ACP JSON-RPC frame.
 
 set -euo pipefail
 
-template=/usr/local/share/claude/managed-settings.template.json
-target=/etc/claude-code/managed-settings.json
+# Overridable only so tests/test_claude_entry.py can run this outside the image.
+etc_dir="${CLAUDE_ENTRY_ETC_DIR:-/etc/claude-code}"
+share_dir="${CLAUDE_ENTRY_SHARE_DIR:-/usr/local/share/claude}"
+
+template="$share_dir/managed-settings.template.json"
+target="$etc_dir/managed-settings.json"
 
 mode="${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
 case "$mode" in
@@ -35,6 +46,54 @@ if [ -f "$template" ]; then
 else
     echo "claude-dev-entry: warning: $template missing; continuing without" \
          "the container policy" >&2
+fi
+
+# The "This run" section: one bullet per fact the base text gets wrong or
+# doesn't know. An explicit `--mount rw` adds nothing (the base is accurate).
+run_section() {
+    local mode="${AGENT_MOUNT_MODE:-}" outbox="${AGENT_OUTBOX:-}" role="${AGENT_ROLE:-}"
+    local project="$PWD"
+    if [ -n "$role" ]; then
+        printf -- '- Role: `%s`.\n' "$role"
+    fi
+    case "$mode" in
+        ""|rw) ;;
+        ro)
+            printf -- '- Project mount: read-only. Every write under `%s` fails with' "$project"
+            printf -- ' "Read-only file system"; nothing you do there reaches the host.\n'
+            ;;
+        overlay)
+            printf -- '- Project mount: throwaway overlay. You may edit files, build and run'
+            printf -- ' tests, but every change under `%s` is discarded when the container' "$project"
+            printf -- ' stops and never reaches the host.\n'
+            ;;
+        *)
+            echo "claude-dev-entry: warning: unknown AGENT_MOUNT_MODE=$mode;" \
+                 "not describing it" >&2
+            ;;
+    esac
+    if [ -n "$outbox" ]; then
+        printf -- '- Outbox: `%s` is bind-mounted read-write from the host. Write every' "$outbox"
+        printf -- ' result the task asks for (reports, reviews, verdicts, patches) there.'
+        case "$mode" in
+            ro|overlay) printf -- ' It is the only location under the project whose changes persist.' ;;
+        esac
+        printf '\n'
+    fi
+}
+
+base="$share_dir/CLAUDE.base.md"
+section="$(run_section)"
+if [ -n "$section" ]; then
+    if [ -f "$base" ]; then
+        {
+            cat "$base"
+            printf '\n## This run (overrides the mount description above)\n\n%s\n' "$section"
+        } >"$etc_dir/CLAUDE.md"
+    else
+        echo "claude-dev-entry: warning: $base missing; CLAUDE.md does not" \
+             "describe this run's mounts" >&2
+    fi
 fi
 
 exec "$@"

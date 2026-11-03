@@ -186,46 +186,118 @@ const XARGS_VALUE_OPTIONS = new Set([
   "--replace",
 ]);
 
+// Project mount modes bins/run-dsh exports as AGENT_MOUNT_MODE (--mount).
+const MOUNT_MODES = new Set(["rw", "ro", "overlay"]);
+
 /**
- * Container facts exported by bins/run-dsh.
+ * @typedef {{
+ *   project: string,
+ *   target: string,
+ *   gitReadOnly: boolean,
+ *   mountMode?: "rw" | "ro" | "overlay",
+ *   outbox?: string,
+ *   role?: string,
+ * }} ContainerFacts
+ */
+
+/**
+ * Container facts exported by bins/run-dsh. mountMode, outbox and role come
+ * from the multi-agent options (--mount, --outbox, --role); without them the
+ * facts describe the default read-write project mount.
  * @param {NodeJS.ProcessEnv} [env]
- * @returns {{ project: string, target: string, gitReadOnly: boolean }}
+ * @returns {ContainerFacts}
  */
 export function containerFacts(env = process.env) {
   const project = env.DSH_PROJECT_DIR?.trim();
   const target = env.CARGO_TARGET_DIR?.trim();
+  const mountMode = env.AGENT_MOUNT_MODE?.trim();
+  const outbox = env.AGENT_OUTBOX?.trim();
+  const role = env.AGENT_ROLE?.trim();
   return {
     project: project === undefined || project === "" ? "the session workspace" : project,
     target: target === undefined || target === "" ? "/target" : target,
     gitReadOnly: env.DSH_GIT_READ_ONLY === "1",
+    // An unknown mode falls back to rw: the launcher validates --mount, so
+    // only a hand-set variable can get here.
+    mountMode: MOUNT_MODES.has(mountMode) ? mountMode : "rw",
+    outbox: outbox === undefined || outbox === "" ? undefined : outbox,
+    role: role === undefined || role === "" ? undefined : role,
   };
+}
+
+/**
+ * The project paragraph: what the project mount is and what persists.
+ * @param {ContainerFacts} facts
+ * @returns {string}
+ */
+function projectParagraph(facts) {
+  const rest = `Treat the container OS as disposable: apt/pip/npm installs, \`/etc\`, \`/usr\`, \`/tmp\` and background services vanish when the container stops.`;
+  const tail = `\`sudo\` is not installed: run \`apt-get\`/\`apt\` directly. There is no systemd; start daemons directly. Container-level changes (package installs, \`/etc\` edits, services) are expected here; they only affect this disposable container.`;
+  const persists = `\`${facts.target}\`, \`~/.dsh\`, \`~/.agents\` and the mounted caches persist.`;
+  switch (facts.mountMode) {
+    case "ro":
+      return `The project directory (\`${facts.project}\`) is mounted read-only for this run, at its host path: reading, searching and running read-only commands work, but every write under it fails with \`Read-only file system\`. ${rest} ${persists} ${tail}`;
+    case "overlay":
+      return `The project directory (\`${facts.project}\`) is a throwaway overlay of the host project for this run, at its host path: you may edit files, build and run tests, but every change under it is discarded when the container stops and never reaches the host. ${rest} ${persists} ${tail}`;
+    default:
+      return `The project directory (\`${facts.project}\`) is a host bind mount at the same absolute path: files you edit are real host files and persist. ${rest} The project, ${persists} ${tail}`;
+  }
+}
+
+/**
+ * The outbox paragraph: where results go.
+ * @param {ContainerFacts} facts
+ * @returns {string}
+ */
+function outboxParagraph(facts) {
+  const where = `Outbox: \`${facts.outbox}\` is bind-mounted read-write from the host. Write every result the task asks for (reports, reviews, verdicts, patches) there.`;
+  return facts.mountMode === "rw"
+    ? where
+    : `${where} It is the only location under the project whose changes persist.`;
 }
 
 /**
  * Render the always-on container context. Kept short: this is a runtime
  * snapshot, not a tutorial; details that belong to the task go in AGENTS.md.
- * @param {{ project: string, target: string, gitReadOnly: boolean }} facts
+ * With the default facts (rw mount, no outbox, no role) the text is exactly
+ * the pre-multi-agent text (snapshot-tested).
+ * @param {ContainerFacts} facts
  * @returns {string}
  */
 export function renderEnvironment(facts) {
+  const mountMode = facts.mountMode ?? "rw";
   const git = facts.gitReadOnly
     ? "`.git` is mounted read-only. Read-only git (`status`, `log`, `diff`, `show`, `blame`) works. Do not commit, stage, push, stash, checkout, reset, rebase or otherwise write git state: commits are made by the operator on the host, signed with their GPG key. When a change is ready, report it with `git diff` and a proposed commit message instead."
     : "Git writes are reserved for the operator on the host. Do not commit, stage, push, stash, checkout, reset or rebase; report a `git diff` and a proposed commit message instead.";
-  return [
+  const lines = [
     "Container environment: this dsh server runs inside the project's disposable dev container, as root.",
+  ];
+  if (facts.role !== undefined) lines.push("", `Role for this run: ${facts.role}.`);
+  lines.push(
     "",
     "Access policy: this container is a disposable isolation boundary; isolation is the operator's responsibility, not yours. When DSH's file policy above is `danger-full-access` (the run-dsh default), the file sandbox is off and approval is `never`, so no action needs prior permission: run commands, install packages, edit any file including `/etc` and `/usr`, start services, and use the network as the task requires. Never ask the user whether to run a command or modify a file, and never stop short of a required step because it looks risky or privileged; `ask_user_question` is for the user's own decisions (product or design trade-offs), not for permission to act. Only actions the container physically blocks — such as writing the read-only `.git` described below — are off limits.",
     "",
-    `The project directory (\`${facts.project}\`) is a host bind mount at the same absolute path: files you edit are real host files and persist. Treat the container OS as disposable: apt/pip/npm installs, \`/etc\`, \`/usr\`, \`/tmp\` and background services vanish when the container stops. The project, \`${facts.target}\`, \`~/.dsh\`, \`~/.agents\` and the mounted caches persist. \`sudo\` is not installed: run \`apt-get\`/\`apt\` directly. There is no systemd; start daemons directly. Container-level changes (package installs, \`/etc\` edits, services) are expected here; they only affect this disposable container.`,
+    projectParagraph({ ...facts, mountMode }),
+  );
+  if (facts.outbox !== undefined) {
+    lines.push("", outboxParagraph({ ...facts, mountMode }));
+  }
+  lines.push(
     "",
     `Build artifacts: \`CARGO_TARGET_DIR\` is \`${facts.target}\` (a per-project named volume that survives container restarts). \`cargo build\`/\`cargo run\` write there; the project's \`./target\` is not the build output and may contain host-built binaries. A \`GLIBC_x.y not found\` or loader error from \`./target\` means a host binary from a different libc: do not investigate or modify glibc. Rebuild inside the container and run \`${facts.target}/debug/...\` or \`cargo run\`.`,
     "",
     "Native binaries built inside the container may likewise not run on the host; the container's libc is the reference for this session.",
     "",
     "Git: " + git,
-    "",
-    "Destructive edits under the project are real host-file changes, and the read-only `.git` means `git checkout` cannot undo them. Verify the resolved path before a recursive delete or move; when a deletion or move is what the task needs, do it.",
-  ].join("\n");
+  );
+  // Only a read-write mount makes project edits real host changes.
+  if (mountMode === "rw") {
+    lines.push(
+      "",
+      "Destructive edits under the project are real host-file changes, and the read-only `.git` means `git checkout` cannot undo them. Verify the resolved path before a recursive delete or move; when a deletion or move is what the task needs, do it.",
+    );
+  }
+  return lines.join("\n");
 }
 
 /**

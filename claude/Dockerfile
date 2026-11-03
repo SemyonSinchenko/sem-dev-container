@@ -65,10 +65,16 @@ ENV CLAUDE_CONFIG_DIR=/root/.claude \
 #   - managed-settings.json: rendered at container start by claude-dev-entry
 #     from the template (permission mode from CLAUDE_PERMISSION_MODE, git
 #     write deny rules).
+#   - CLAUDE.base.md: a pristine copy of CLAUDE.md. For multi-agent runs
+#     (AGENT_ROLE / AGENT_MOUNT_MODE / AGENT_OUTBOX set) claude-dev-entry
+#     rewrites CLAUDE.md as this base plus a "This run" section; otherwise
+#     CLAUDE.md is used exactly as copied here.
 RUN install -d /etc/claude-code /usr/local/share/claude
 COPY APPEND_SYSTEM.md /etc/claude-code/CLAUDE.md
+COPY APPEND_SYSTEM.md /usr/local/share/claude/CLAUDE.base.md
 COPY claude/managed-settings.template.json /usr/local/share/claude/
 RUN chmod 0444 /etc/claude-code/CLAUDE.md \
+              /usr/local/share/claude/CLAUDE.base.md \
               /usr/local/share/claude/managed-settings.template.json
 
 # claude-dev-entry fronts every container command (TUI, ACP, --shell, --exec):
