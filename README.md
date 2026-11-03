@@ -69,6 +69,7 @@ run-claude --acp
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
 | `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
 | `bins/run-claude`      | run the `dev-claude` container: the `claude` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.claude-container` |
+| `bins/run-check`       | run a deterministic check (tests, lint) in `dev-shared`: no agent, no credentials, throwaway overlay of the project by default; exit status is the check's |
 | `bins/devc_common.py`  | helpers shared by the `run-*` launchers (engine, cache mounts, `.git` ro remount, `/target` volume, env merge); found next to the symlink-resolved script |
 | `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
 | `dsh/dsh-web-entry`    | container-side web wrapper: binds the container IP; Ctrl-D/Ctrl-C stops the harness |
@@ -92,11 +93,12 @@ run-claude --acp
 | `tests/test_run_claude.py` | dry-run contract tests for `run-claude` TUI/ACP modes |
 | `tests/test_devc_common.py` | unit tests for `devc_common` plus the symlinked/copied launcher install check |
 | `tests/test_golden_compat.py` | golden tests: every `run-*` launcher's `--dry-run` command stays byte-identical |
+| `tests/test_run_check.py` | tests for `run-check`: mounts, no credentials, `--target-from`, exit status |
 | `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port) |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
 | `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, …) plus `make test-dsh` / `make test-bins` |
 
-## Running: bins/run-pi, run-pa, run-dsh, and run-claude
+## Running: bins/run-pi, run-pa, run-dsh, run-claude, and run-check
 
 The old `run-pi` bash function in `.bashrc` is replaced by standalone
 Python 3 scripts (stdlib only, Python 3.10+), one per harness. Symlink them
@@ -107,6 +109,7 @@ ln -s ~/sem-dev-container/bins/run-pi ~/.local/bin/run-pi
 ln -s ~/sem-dev-container/bins/run-pa ~/.local/bin/run-pa
 ln -s ~/sem-dev-container/bins/run-dsh ~/.local/bin/run-dsh
 ln -s ~/sem-dev-container/bins/run-claude ~/.local/bin/run-claude
+ln -s ~/sem-dev-container/bins/run-check ~/.local/bin/run-check
 ```
 
 The scripts do what the bash function did: `mkdir -p` the host cache dirs,
@@ -550,6 +553,38 @@ Rebuild the image after changing anything under `claude/` or
 make claude
 make test-bins
 ```
+
+### Deterministic checks: bins/run-check
+
+`run-check` runs one check command (tests, lint, `openspec validate`, …) in
+the `dev-shared` image, with no agent. A check runs code an agent just
+wrote, so it sees **no** harness state and **no** credentials: no
+`~/.claude`, `~/.dsh` or `~/.agents`, no provider API keys, no SearXNG. It
+gets the project, the read-only `.git`, the build caches and a `/target`
+volume.
+
+```sh
+run-check -- make test                       # throwaway overlay of the project
+run-check --mount ro --offline -- make lint  # read-only, no network
+run-check --role impl --target-from claude -- cargo test   # reuse the agent's build
+run-check --outbox .loop/chg-17 --timeout 600 -- ./ci.sh
+```
+
+- The project is mounted as a podman overlay (`:O`) by default: the check
+  can build and write files, but nothing reaches the host. Pass
+  `--mount ro` or `--mount rw` to change that, and always with docker
+  (no overlay mounts there). `AGENT_MOUNT_MODE` is always exported.
+- `/target` is `check-target<escaped pwd>` (or `check-target.<role>…` with
+  `--role`). `--target-from claude|dsh` mounts that harness's volume for the
+  project instead, with the same `--role`/`--shared-target` rules, so a
+  Rust check doesn't rebuild from scratch.
+- `--offline` runs with `--network none`.
+- `--outbox`, `--label`, `--name`, `--timeout` and `--role` work as for the
+  agent launchers, but there is no role lock: parallel checks are fine.
+- The command goes after `--` (or `--exec CMD…`); `--shell` opens bash.
+  stdout/stderr pass through, and the exit status is the container's
+  (255 when `--timeout` expires), so an orchestrator can use it as the
+  verdict. `--env KEY` still opts one variable in on purpose.
 
 ### Golden launcher tests
 

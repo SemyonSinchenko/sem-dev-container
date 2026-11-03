@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""
+run-check — run a deterministic check (tests, lint, `openspec validate`, ...)
+in the dev-shared container, with no agent and no agent credentials.
+
+Checks run code an agent just wrote, so they see none of the harness state:
+no ~/.claude, ~/.dsh or ~/.agents mount, no provider API keys, no SearXNG
+forwarding. They get the project, the read-only .git, the build caches and a
+/target volume, like the agent containers do.
+
+The project is mounted as a throwaway podman overlay by default
+(`--mount overlay`): the check may build and write files, but nothing reaches
+the host. Use `--mount ro` or `--mount rw` explicitly (and always with
+docker, which has no overlay mounts). `--outbox DIR` bind-mounts one project
+subdir rw on top for reports.
+
+The /target volume is check-target<escaped pwd> (check-target.ROLE<escaped
+pwd> with --role). `--target-from claude|dsh` mounts that harness's volume
+for this project instead (same --role/--shared-target rules), so a check
+reuses the agent's build output rather than rebuilding from scratch.
+
+`--offline` cuts the network (`--network none`): unlike agents, checks need
+no model API.
+
+The command runs as-is; stdout/stderr pass through untouched, and run-check's
+exit status is the container's (podman exits 255 when --timeout expires), so
+an orchestrator can treat it as the check verdict. The launcher execs
+podman/docker.
+
+Examples:
+  run-check -- make test                       # overlay, default network
+  run-check --exec cargo test --release        # same, --exec spelling
+  run-check --mount ro --offline -- make lint  # read-only, no network
+  run-check --role impl --target-from claude -- cargo test
+  run-check --outbox .loop/chg-17 --timeout 600 -- ./ci.sh
+  run-check --shell                            # bash in the check container
+  run-check --dry-run -- make test             # print the command
+
+Script options must come before `--` or `--exec`; everything after is
+container-side. See MULTI_AGENT_ROLES_PLAN.md §9.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import sys
+from pathlib import Path
+
+# Shared launcher helpers live next to the real script (bins/devc_common.py);
+# resolve() follows the ~/.local/bin symlink back to the repo.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import devc_common as dc
+except ImportError:
+    sys.exit("run-check: bins/devc_common.py not found next to the real "
+             "script; install the launcher as a symlink (see README)")
+
+PROG = "run-check"
+HARNESS = "check"                # sem.harness label value
+IMAGE = "dev-shared"             # default image: no agent layer needed
+VOLUME_PREFIX = "check-target"   # named volume per project: check-target<escaped pwd> -> /target
+DEFAULT_MOUNT = "overlay"
+
+# /target volume prefixes of the agent launchers, for --target-from. Keep in
+# sync with VOLUME_PREFIX in bins/run-claude and bins/run-dsh
+# (tests/test_run_check.py compares the resulting volume names).
+TARGET_FROM = {
+    "claude": "claude-target",
+    "dsh": "dsh-target",
+}
+
+
+def ensure_mount_sources(home: Path, pwd: Path) -> None:
+    """Create host dirs that will be bind-mounted (podman refuses to create them)."""
+    for d in [pwd, *dc.cache_dirs(home)]:
+        d.mkdir(parents=True, exist_ok=True)
+
+
+def build_mounts(home: Path, pwd: Path, selinux: bool, mode: str,
+                 outbox: Path | None, volume: str) -> list[str]:
+    """-v specs: project, caches, read-only .git, outbox, /target volume.
+
+    No harness state of any kind: a check must not see agent credentials.
+    """
+    z = ":z" if selinux else ""
+    specs = [dc.project_mount(pwd, mode, selinux), *dc.cache_mounts(home, z)]
+    specs += dc.git_ro_mount(pwd, selinux)
+    specs += dc.outbox_mount(outbox, selinux)
+    specs.append(f"{volume}:/target")
+    return specs
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog=PROG,
+        description="Run a deterministic check in the dev-shared container: no agent, "
+                    "no agent credentials, a throwaway overlay of the project by "
+                    "default. The exit status is the check's.",
+        epilog="Pass the check command after `--` (or with --exec). Script options must "
+               "come before `--`/`--exec`: everything after is container-side.",
+    )
+    p.add_argument("--shell", action="store_true",
+                   help="drop into an interactive bash shell instead of running a command")
+    p.add_argument("--exec", dest="exec_cmd", nargs=argparse.REMAINDER, metavar="CMD",
+                   help="run CMD... (same as `-- CMD...`)")
+    p.add_argument("--engine", default="auto", metavar="ENGINE",
+                   help="container engine: podman, docker, or auto (default: auto)")
+    p.add_argument("--image", default=IMAGE, metavar="TAG",
+                   help=f"image to run (default: {IMAGE})")
+    p.add_argument("--no-selinux", dest="selinux", action="store_false", default=True,
+                   help="omit the :z suffix on bind mounts (non-SELinux hosts)")
+    p.add_argument("--env", action="append", default=[], metavar="KEY[=VALUE]",
+                   help="extra env var to pass into the container (repeatable); "
+                        "KEY alone passes the host value through")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the command and exit without running it")
+    dc.add_role_args(p, lock=False)
+    p.add_argument("--mount", choices=dc.MOUNT_MODES, metavar="MODE",
+                   help=f"how the project dir is mounted: {DEFAULT_MOUNT} (default; "
+                        "podman only), ro, or rw")
+    dc.add_outbox_args(p)
+    dc.add_identity_args(p)
+    p.add_argument("--offline", action="store_true",
+                   help="run with no network (--network none)")
+    p.add_argument("--target-from", choices=sorted(TARGET_FROM), metavar="HARNESS",
+                   help="mount the /target volume of HARNESS (claude or dsh) for this "
+                        "project instead of the check's own, so builds are reused")
+    p.add_argument("command", nargs="*", metavar="CMD",
+                   help="the check command and its arguments (after --)")
+    args = p.parse_args(argv)
+    if args.exec_cmd is not None and args.command:
+        p.error("give the command either after -- or with --exec, not both")
+    if args.exec_cmd is not None:
+        if not args.exec_cmd:
+            p.error("--exec needs a command")
+        args.command = args.exec_cmd
+    if args.shell and args.command:
+        p.error("--shell cannot be combined with a command")
+    if not args.shell and not args.command:
+        p.error("no check command: use `run-check -- CMD...`, --exec CMD..., or --shell")
+    dc.check_role_args(p, args)
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    home = Path.home()
+    pwd = Path.cwd()
+    engine = dc.resolve_engine(args.engine)
+
+    if args.mount is None:
+        if engine != "podman":
+            print(f"{PROG}: error: the default --mount {DEFAULT_MOUNT} needs podman; "
+                  f"with {engine} pass --mount ro or --mount rw", file=sys.stderr)
+            return 2
+        # Fill in the default here, so AGENT_MOUNT_MODE is always exported
+        # (run-check has no legacy behaviour to preserve).
+        args.mount = DEFAULT_MOUNT
+    dc.check_engine_support(args, engine, PROG)
+    outbox = dc.resolve_outbox(pwd, args.outbox, PROG)
+    prefix = TARGET_FROM.get(args.target_from, VOLUME_PREFIX)
+    volume = dc.target_volume(prefix, pwd, args.role, args.shared_target)
+
+    ensure_mount_sources(home, pwd)
+    dc.ensure_outbox(outbox)
+
+    cmd = [engine, "run", "--rm", "-it" if sys.stdin.isatty() else "-i"]
+    cmd += dc.engine_run_options(HARNESS, pwd, args)
+    for spec in build_mounts(home, pwd, args.selinux, args.mount, outbox, volume):
+        cmd += ["-v", spec]
+    cmd += ["-w", str(pwd)]
+    extra = []
+    if args.role is not None:
+        extra.append(f"AGENT_ROLE={args.role}")
+    extra += dc.mount_envs(args)
+    extra += dc.outbox_envs(outbox)
+    # No passthrough keys and no SearXNG: only what the check itself needs.
+    # --env extras come last and win, so a check can opt in to one variable.
+    fixed = {"CARGO_TARGET_DIR": "CARGO_TARGET_DIR=/target"}
+    for env in dc.merge_envs(fixed, [], extra + args.env):
+        cmd += ["-e", env]
+    if args.offline:
+        cmd += ["--network", "none"]
+    cmd.append(args.image)
+    cmd += ["bash"] if args.shell else args.command
+
+    if args.dry_run:
+        print(" ".join(shlex.quote(c) for c in cmd))
+        return 0
+    # Replace the launcher with podman/docker: stdio passes through untouched
+    # and the container's exit status (the check verdict) is ours.
+    try:
+        os.execvp(cmd[0], cmd)
+    except OSError as exc:
+        print(f"{PROG}: cannot execute {cmd[0]}: {exc}", file=sys.stderr)
+        return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())
