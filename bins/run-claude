@@ -12,7 +12,7 @@ signals, and exit status. stdout is protocol-only; diagnostics go to stderr.
 No pseudo-TTY is allocated even when stdin is a terminal, because terminal
 echo and CR/LF translation corrupt ACP framing.
 
-State is split like run-dsh's: the host's ~/.claude is mounted at
+State is split like run-dsh's: the host's ~/.claude-personal is mounted at
 /root/.claude (CLAUDE_CONFIG_DIR) for shared, project-agnostic state
 (credentials, settings, skills, agents, commands, plugins, CLAUDE.md), and the
 per-session state entries (transcripts, file history, plans, todos, prompt
@@ -26,7 +26,7 @@ CLAUDE_PERMISSION_MODE=bypassPermissions. Isolation is the operator's
 responsibility. Override one run with `--env CLAUDE_PERMISSION_MODE=default`.
 
 ANTHROPIC_API_KEY is deliberately not passed through: Claude Code uses the
-subscription login stored in ~/.claude/.credentials.json. Opt in for one run
+subscription login stored in ~/.claude-personal/.credentials.json. Opt in for one run
 with `--env ANTHROPIC_API_KEY`. See README.md.
 
 Examples:
@@ -80,14 +80,18 @@ except ImportError:
 AGENT = "claude"                    # TUI binary run inside the container
 IMAGE = "dev-claude"                # default image (override with --image)
 ACP_ENTRY = "claude-acp-entry"      # foreground ACP stdio entry installed by claude/Dockerfile
-STATE_DIR = ".claude"               # host $HOME/.claude  ->  /root/.claude (CLAUDE_CONFIG_DIR)
+# The host side is deliberately not ~/.claude: that one belongs to Claude
+# Desktop and the host CLI (another account, settings and connectors), so a
+# host /login never switches the containers' account. See README.md.
+STATE_DIR = ".claude-personal"      # host $HOME/.claude-personal  ->  CONFIG_DIR
+CONFIG_DIR = "/root/.claude"        # CLAUDE_CONFIG_DIR in claude/Dockerfile
 PROJECT_STATE_DIR = ".claude-container"  # <project>/.claude-container: per-project session state
 AGENTS_DIR = ".agents"              # host $HOME/.agents (shared skills, as for run-dsh)
 VOLUME_PREFIX = "claude-target"     # named volume per project: claude-target<escaped pwd> -> /target
 
 # Entries of CLAUDE_CONFIG_DIR that hold per-session state. Each one is
 # over-mounted from <project>/.claude-container/<name>, so it stays with the
-# project; everything else in ~/.claude stays shared with the host.
+# project; everything else in ~/.claude-personal stays shared across projects.
 # `projects` holds the transcripts (what session/list and --resume read).
 PROJECT_STATE_DIRS = [
     "projects",
@@ -148,22 +152,21 @@ def build_mounts(home: Path, pwd: Path, selinux: bool, project_state: Path,
                  outbox: Path | None = None) -> list[str]:
     """-v specs: bind mounts (host:container) + the per-project named volume."""
     z = ":z" if selinux else ""
-    config_dir = f"/root/{STATE_DIR}"
     specs = [
         dc.project_mount(pwd, mode, selinux),
-        f"{home / STATE_DIR}:{config_dir}{z}",
+        f"{home / STATE_DIR}:{CONFIG_DIR}{z}",
         f"{home / AGENTS_DIR}:/root/{AGENTS_DIR}{z}",
         *dc.cache_mounts(home, z),
     ]
     # Over-mount the per-session state entries on top of the shared
-    # ~/.claude mount above (a later -v entry wins), so transcripts and
-    # friends land in <project>/.claude-container while credentials and
-    # settings stay shared with the host. The shared dir itself stays a
+    # ~/.claude-personal mount above (a later -v entry wins), so transcripts
+    # and friends land in <project>/.claude-container while credentials and
+    # settings stay shared across projects. The shared dir itself stays a
     # directory mount: credentials are rewritten by rename, which a
     # single-file bind mount cannot survive. With --role, project_state is
     # the role's own dir, so parallel roles never share transcripts.
     for name in PROJECT_STATE_DIRS + PROJECT_STATE_FILES:
-        specs.append(f"{project_state / name}:{config_dir}/{name}{z}")
+        specs.append(f"{project_state / name}:{CONFIG_DIR}/{name}{z}")
     # Re-mount .git read-only over the project mount above (see
     # APPEND_SYSTEM.md): commits belong on the host.
     specs += dc.git_ro_mount(pwd, selinux)

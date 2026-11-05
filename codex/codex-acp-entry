@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# codex-acp-entry — foreground ACP stdio server for the dev-codex container.
+#
+# The container command behind `run-codex --acp` (run through codex-dev-entry,
+# which has already rendered the managed config and exported
+# INITIAL_AGENT_MODE). stdin, stdout, stderr and the exit status belong to
+# `codex-acp`, which an ACP client such as Emacs agent-shell/acp.el speaks to
+# directly. The adapter exits on stdin EOF, and run-codex execs podman/docker,
+# so no stdin watcher or signal relay is needed here.
+#
+# stdout is a protocol socket: every byte on it must be an ACP JSON-RPC frame.
+# Diagnostics go to stderr.
+
+set -euo pipefail
+
+# Project isolation is the reason run-codex exports CODEX_PROJECT_HOME: it
+# over-mounts <project>/.codex-container/sessions (rollouts) and the SQLite
+# home (the thread index session/list reads) on top of the host-shared
+# ~/.codex. If either mount is missing, sessions would land in the shared
+# home and `session/list` would mix projects, so fail loudly.
+if [ -n "${CODEX_PROJECT_HOME:-}" ]; then
+    home="${CODEX_HOME:-/root/.codex}"
+    for dir in "$home/sessions" "${CODEX_SQLITE_HOME:-$home}"; do
+        if ! mountpoint -q "$dir"; then
+            echo "codex-acp-entry: CODEX_PROJECT_HOME is set but $dir is not" \
+                 "a mount; refusing to run with shared project state" >&2
+            exit 1
+        fi
+    done
+fi
+
+exec codex-acp "$@"

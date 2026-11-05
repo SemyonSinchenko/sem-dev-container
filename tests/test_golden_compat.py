@@ -71,6 +71,11 @@ CASES = {
         ("acp-args", ["--acp", "--", "--debug"]),
         ("agent-args", ["--", "--continue"]),
     ],
+    "run-codex": COMMON_CASES + [
+        ("acp", ["--acp"]),
+        ("acp-args", ["--acp", "--", "--debug"]),
+        ("agent-args", ["--", "resume", "--last"]),
+    ],
     "run-dsh": COMMON_CASES + [
         ("acp", ["--acp"]),
         ("acp-args", ["--acp", "--", "--debug"]),
@@ -165,6 +170,9 @@ class GoldenCompatTest(unittest.TestCase):
     def test_run_claude_golden(self) -> None:
         self.check_golden("run-claude")
 
+    def test_run_codex_golden(self) -> None:
+        self.check_golden("run-codex")
+
     def test_run_dsh_golden(self) -> None:
         self.check_golden("run-dsh")
 
@@ -175,7 +183,7 @@ class GoldenCompatTest(unittest.TestCase):
         self.check_golden("run-pa")
 
     def test_current_option_names_still_parse(self) -> None:
-        for launcher in ("run-claude", "run-dsh"):
+        for launcher in ("run-claude", "run-codex", "run-dsh"):
             for option in CURRENT_OPTIONS:
                 with self.subTest(launcher=launcher, option=option[0]):
                     proc = self.dry_run(launcher, *option)

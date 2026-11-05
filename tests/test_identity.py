@@ -22,6 +22,7 @@ from pathlib import Path
 
 BINS = Path(__file__).resolve().parents[1] / "bins"
 LAUNCHERS = {"run-claude": ("claude", "claude-acp-entry"),
+             "run-codex": ("codex", "codex-acp-entry"),
              "run-dsh": ("dsh", "dsh-acp-entry")}
 
 PASSTHROUGH_KEYS = (

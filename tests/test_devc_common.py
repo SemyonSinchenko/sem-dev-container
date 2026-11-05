@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 BINS = Path(__file__).resolve().parents[1] / "bins"
-LAUNCHERS = ("run-claude", "run-dsh", "run-pi", "run-pa", "run-check")
+LAUNCHERS = ("run-claude", "run-codex", "run-dsh", "run-pi", "run-pa", "run-check")
 
 sys.path.insert(0, str(BINS))
 import devc_common as dc  # noqa: E402

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# codex — policy wrapper installed as /usr/local/bin/codex in the dev-codex
+# image, ahead of the npm-installed /usr/bin/codex on PATH.
+#
+# Maps CODEX_PERMISSION_MODE (the codex-acp session mode ids) to Codex CLI
+# config overrides and execs the real binary. Root-level `-c` overrides apply
+# to every subcommand (the TUI, resume, exec, login, and the `app-server` the
+# ACP adapter spawns through CODEX_PATH), take precedence over
+# ~/.codex/config.toml, and set only the initial mode: /permissions in the TUI
+# or the ACP mode selector can still switch it.
+#
+# Codex's own Linux sandbox (bwrap) cannot set up its namespaces inside the
+# container, so only agent-full-access runs commands; the container is the
+# isolation boundary. codex-dev-entry validates the mode first.
+#
+# Never write to stdout here: the adapter's app-server speaks JSON-RPC on it.
+
+# Overridable only so tests/test_codex_entry.py can run this outside the image.
+real="${CODEX_WRAPPER_REAL_BIN:-/usr/bin/codex}"
+
+case "${CODEX_PERMISSION_MODE:-agent-full-access}" in
+    agent-full-access) sandbox=danger-full-access approval=never reviewer=user ;;
+    agent)             sandbox=workspace-write approval=on-request reviewer=auto_review ;;
+    workspace-write)   sandbox=workspace-write approval=on-request reviewer=user ;;
+    *)                 sandbox=read-only approval=on-request reviewer=user ;;
+esac
+
+exec "$real" \
+    -c "sandbox_mode=\"$sandbox\"" \
+    -c "approval_policy=\"$approval\"" \
+    -c "approvals_reviewer=\"$reviewer\"" \
+    "$@"

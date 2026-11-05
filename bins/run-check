@@ -4,7 +4,7 @@ run-check — run a deterministic check (tests, lint, `openspec validate`, ...)
 in the dev-shared container, with no agent and no agent credentials.
 
 Checks run code an agent just wrote, so they see none of the harness state:
-no ~/.claude, ~/.dsh or ~/.agents mount, no provider API keys, no SearXNG
+no ~/.claude-personal, ~/.dsh or ~/.agents mount, no provider API keys, no SearXNG
 forwarding. They get the project, the read-only .git, the build caches and a
 /target volume, like the agent containers do.
 
@@ -15,7 +15,7 @@ docker, which has no overlay mounts). `--outbox DIR` bind-mounts one project
 subdir rw on top for reports.
 
 The /target volume is check-target<escaped pwd> (check-target.ROLE<escaped
-pwd> with --role). `--target-from claude|dsh` mounts that harness's volume
+pwd> with --role). `--target-from claude|codex|dsh` mounts that harness's volume
 for this project instead (same --role/--shared-target rules), so a check
 reuses the agent's build output rather than rebuilding from scratch.
 
@@ -64,10 +64,11 @@ VOLUME_PREFIX = "check-target"   # named volume per project: check-target<escape
 DEFAULT_MOUNT = "overlay"
 
 # /target volume prefixes of the agent launchers, for --target-from. Keep in
-# sync with VOLUME_PREFIX in bins/run-claude and bins/run-dsh
+# sync with VOLUME_PREFIX in bins/run-claude, bins/run-codex and bins/run-dsh
 # (tests/test_run_check.py compares the resulting volume names).
 TARGET_FROM = {
     "claude": "claude-target",
+    "codex": "codex-target",
     "dsh": "dsh-target",
 }
 
@@ -125,7 +126,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--offline", action="store_true",
                    help="run with no network (--network none)")
     p.add_argument("--target-from", choices=sorted(TARGET_FROM), metavar="HARNESS",
-                   help="mount the /target volume of HARNESS (claude or dsh) for this "
+                   help="mount the /target volume of HARNESS (claude, codex or dsh) for this "
                         "project instead of the check's own, so builds are reused")
     p.add_argument("command", nargs="*", metavar="CMD",
                    help="the check command and its arguments (after --)")

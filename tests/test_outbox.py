@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 
 BINS = Path(__file__).resolve().parents[1] / "bins"
-LAUNCHERS = ("run-claude", "run-dsh")
+LAUNCHERS = ("run-claude", "run-codex", "run-dsh")
 
 PASSTHROUGH_KEYS = (
     "ZAI_API_KEY",
@@ -138,6 +138,7 @@ class OutboxTest(unittest.TestCase):
             ".git": "must not be inside",
             ".git/loop": "must not be inside",
             ".claude-container/x": "must not be inside",
+            ".codex-container/x": "must not be inside",
             ".dsh": "must not be inside",
             ".dsh/roles/review/out": "must not be inside",
             "afile": "is not a directory",
@@ -165,6 +166,7 @@ class OutboxTest(unittest.TestCase):
 
     def test_acp_invariants_with_outbox(self) -> None:
         for launcher, entry in (("run-claude", "claude-acp-entry"),
+                                ("run-codex", "codex-acp-entry"),
                                 ("run-dsh", "dsh-acp-entry")):
             with self.subTest(launcher=launcher):
                 tokens = self.tokens(launcher, "--acp", "--mount", "overlay",

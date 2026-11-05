@@ -2,23 +2,24 @@
 
 Layered dev containers for agentic development. A single heavy **shared**
 base image carries all compilers, runtimes, and tools; each agent harness
-(pi, prime-agent, dsh, claude) is a thin layer on top.
+(pi, prime-agent, dsh, claude, codex) is a thin layer on top.
 
-┌────────────────────────┐ ┌──────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐
-│ pi (thin)              │ │ prime-agent (thin)   │ │ dsh (thin)            │ │ claude (thin)       │
-│ • pi coding agent      │ │ • prime-agent CLI    │ │ • dsh web + ACP (npm) │ │ • claude CLI (npm)  │
-│ • openspec CLI (shared)│ │ • IPython kernel venv│ │ • RPC + ACP clients   │ │ • claude-agent-acp  │
-├────────────────────────┴─┴──────────────────────┴─┴───────────────────────┴─┴─────────────────────┤
-│ shared (heavy, ~everything)                                                                       │
-│  Ubuntu 26.04 base                                                                                │
-│  • build-essential, cmake, protoc, gdb (built from source)                                        │
-│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                                    │
-│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI                          │
-│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                                    │
-│  • Go + open-spdd, hardwood-cli (Parquet)                                                         │
-│  • emacs-nox (30.x) + gnuplot; fd/rg preinstalled so agents reuse them                            │
-│  • shared caches under /cache for host bind-mounts                                                │
-└───────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────┐ ┌──────────────────────┐ ┌───────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+│ pi (thin)              │ │ prime-agent (thin)   │ │ dsh (thin)            │ │ claude (thin)       │ │ codex (thin)        │
+│ • pi coding agent      │ │ • prime-agent CLI    │ │ • dsh web + ACP (npm) │ │ • claude CLI (npm)  │ │ • codex CLI (npm)   │
+│ • openspec CLI (shared)│ │ • IPython kernel venv│ │ • RPC + ACP clients   │ │ • claude-agent-acp  │ │ • codex-acp         │
+├────────────────────────┴─┴──────────────────────┴─┴───────────────────────┴─┴─────────────────────┴─┴─────────────────────┤
+│ shared (heavy, ~everything)                                                                                               │
+│  Ubuntu 26.04 base                                                                                                        │
+│  • build-essential, cmake, protoc, gdb (built from source)                                                                │
+│  • Java 8/11/17/21/25 (+use-java), sbt, Maven (cache → /cache)                                                            │
+│  • Node 22, buf, uv + Python 3.10–3.15, poetry, pre-commit, openspec CLI                                                  │
+│  • zig (cargo-zigbuild), Rust toolchain + rust-analyzer/clippy                                                            │
+│  • Go + open-spdd, hardwood-cli (Parquet)                                                                                 │
+│  • emacs-nox (30.x) + gnuplot; fd/rg preinstalled so agents reuse them                                                    │
+│  • openssh-client + rsync (push code/results to remote benchmark hosts)                                                   │
+│  • shared caches under /cache for host bind-mounts                                                                        │
+└───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ## Build
 
@@ -28,6 +29,7 @@ make pi            # + pi agent
 make prime-agent   # + prime-agent agent
 make dsh           # + DeepSeek Harness (dsh web and acp profiles)
 make claude        # + Claude Code (TUI + claude-agent-acp)
+make codex         # + Codex (TUI + codex-acp)
 make all           # all harnesses
 ```
 
@@ -56,6 +58,10 @@ run-dsh --acp
 # Claude Code: TUI by default, ACP stdio server with --acp
 run-claude
 run-claude --acp
+
+# Codex: TUI by default, ACP stdio server with --acp
+run-codex
+run-codex --acp
 ```
 
 ## Layout
@@ -69,6 +75,7 @@ run-claude --acp
 | `bins/run-pa`          | run the `dev-prime-agent` container with host caches/state mounted |
 | `bins/run-dsh`         | run the `dev-dsh` container attached to its logs; publishes a free port from 30780–30789, or serves ACP over stdio with `--acp` |
 | `bins/run-claude`      | run the `dev-claude` container: the `claude` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.claude-container` |
+| `bins/run-codex`       | run the `dev-codex` container: the `codex` TUI, or an ACP stdio server with `--acp`; per-project session state over-mounted from `<project>/.codex-container` |
 | `bins/run-check`       | run a deterministic check (tests, lint) in `dev-shared`: no agent, no credentials, throwaway overlay of the project by default; exit status is the check's |
 | `bins/devc_common.py`  | helpers shared by the `run-*` launchers (engine, cache mounts, `.git` ro remount, `/target` volume, env merge, the multi-agent options); found next to the symlink-resolved script |
 | `dsh/Dockerfile`       | `FROM dev-shared` + dsh CLI (npm) + pnpm + both foreground wrappers |
@@ -89,8 +96,13 @@ run-claude --acp
 | `claude/claude-dev-entry` | image ENTRYPOINT: renders the managed settings from `CLAUDE_PERMISSION_MODE`, adds a "This run" section to `CLAUDE.md` for multi-agent runs, then execs its arguments |
 | `claude/claude-acp-entry` | container-side ACP wrapper: checks the per-project mounts, execs `claude-agent-acp` |
 | `claude/managed-settings.template.json` | managed settings: initial permission mode + git-write deny rules |
+| `codex/Dockerfile`     | `FROM dev-shared` + Codex CLI + `codex-acp` adapter (npm) + container policy |
+| `codex/codex-dev-entry` | image ENTRYPOINT: validates `CODEX_PERMISSION_MODE`, renders `/etc/codex/managed_config.toml` (developer instructions with a "This run" section for multi-agent runs, project trust), then execs its arguments |
+| `codex/codex-acp-entry` | container-side ACP wrapper: checks the per-project mounts, execs `codex-acp` |
+| `codex/codex-wrapper`  | installed as `/usr/local/bin/codex`: maps `CODEX_PERMISSION_MODE` to sandbox/approval `-c` overrides, execs the real `codex` |
 | `tests/test_run_dsh.py` | dry-run contract tests for `run-dsh` web/ACP modes |
 | `tests/test_run_claude.py` | dry-run contract tests for `run-claude` TUI/ACP modes |
+| `tests/test_run_codex.py` | dry-run contract tests for `run-codex` TUI/ACP modes |
 | `tests/test_devc_common.py` | unit tests for `devc_common` plus the symlinked/copied launcher install check |
 | `tests/test_golden_compat.py` | golden tests: every `run-*` launcher's `--dry-run` command stays byte-identical |
 | `tests/test_run_check.py` | tests for `run-check`: mounts, no credentials, `--target-from`, exit status |
@@ -99,11 +111,12 @@ run-claude --acp
 | `tests/test_outbox.py` | `--outbox`: validation, creation, mount order |
 | `tests/test_identity.py` | `--label`, `--name`, `--timeout` |
 | `tests/test_claude_entry.py` | `claude-dev-entry`: `CLAUDE.md` untouched by default, "This run" section, no stdout |
+| `tests/test_codex_entry.py` | `codex-dev-entry` and the `codex` wrapper: managed config, "This run" section identical to Claude's, mode mapping, no stdout |
 | `tests/golden/` | expected `--dry-run` output per launcher and case (normalised paths/port), plus snapshots of the default DSH environment text |
 | `.m2/settings.xml`     | global Maven settings, COPYed into the shared layer |
-| `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, …) plus `make test-dsh` / `make test-bins` |
+| `Makefile`             | image build targets (`make all`, `make dsh`, `make claude`, `make codex`, …) plus `make test-dsh` / `make test-bins` |
 
-## Running: bins/run-pi, run-pa, run-dsh, run-claude, and run-check
+## Running: bins/run-pi, run-pa, run-dsh, run-claude, run-codex, and run-check
 
 The old `run-pi` bash function in `.bashrc` is replaced by standalone
 Python 3 scripts (stdlib only, Python 3.10+), one per harness. Symlink them
@@ -114,6 +127,7 @@ ln -s ~/sem-dev-container/bins/run-pi ~/.local/bin/run-pi
 ln -s ~/sem-dev-container/bins/run-pa ~/.local/bin/run-pa
 ln -s ~/sem-dev-container/bins/run-dsh ~/.local/bin/run-dsh
 ln -s ~/sem-dev-container/bins/run-claude ~/.local/bin/run-claude
+ln -s ~/sem-dev-container/bins/run-codex ~/.local/bin/run-codex
 ln -s ~/sem-dev-container/bins/run-check ~/.local/bin/run-check
 ```
 
@@ -495,15 +509,20 @@ Claude Code's slash commands and the global skills, and its session
 list/resume works on the per-project transcripts.
 
 **Authentication.** Claude Code uses the subscription login in the host's
-`~/.claude/.credentials.json`; log in once on the host (`claude /login`) or
-inside the container (`run-claude --shell`, then `claude /login`).
+`~/.claude-personal/.credentials.json`; log in once inside the container
+(`run-claude --shell`, then `claude /login`). The host's own `~/.claude` and
+`~/.claude.json` are never mounted: they belong to Claude Desktop and the host
+`claude` CLI, which can be signed in to another account (e.g. a work account
+with its own settings, skills and Slack/Jira connectors) without touching the
+containers. Moving an existing setup over is a one-time
+`cp -a ~/.claude ~/.claude-personal` on the host.
 `ANTHROPIC_API_KEY` is deliberately **not** passed through, so a key set on
 the host for other tools never switches billing to the API; opt in for one
 run with `run-claude --env ANTHROPIC_API_KEY`.
 
 #### Project-local state
 
-The split mirrors `run-dsh`. The host's `~/.claude` is mounted at
+The split mirrors `run-dsh`. The host's `~/.claude-personal` is mounted at
 `/root/.claude` (`CLAUDE_CONFIG_DIR`) as the shared home: credentials,
 `settings.json`, global `CLAUDE.md`, skills, agents, commands and plugins.
 The per-session entries are over-mounted on top of it from the project:
@@ -520,8 +539,8 @@ Add `.claude-container/` to the project's `.gitignore` (this repository
 already does). The shared home stays a directory mount because Claude Code
 rewrites credentials by rename, which a single-file bind mount cannot
 survive. Because `CLAUDE_CONFIG_DIR` is set, the container keeps its global
-state file in `~/.claude/.claude.json`, separate from the host CLI's
-`~/.claude.json`. The list of over-mounted entries is `PROJECT_STATE_DIRS` in
+state file in `~/.claude-personal/.claude.json`, separate from the host
+CLI's `~/.claude.json`. The list of over-mounted entries is `PROJECT_STATE_DIRS` in
 `bins/run-claude`; if a future Claude Code release adds a new per-session
 directory, it lands in the shared home until it is added there.
 `claude-acp-entry` refuses to start when the launcher expects the
@@ -532,7 +551,7 @@ mount, so sessions of different projects never mix.
 
 Claude Code loads managed policy from `/etc/claude-code` for every session,
 on top of the user and project settings, so the policy lives in the image
-and is never written into the shared `~/.claude`:
+and is never written into the shared `~/.claude-personal`:
 
 - `/etc/claude-code/CLAUDE.md` is `APPEND_SYSTEM.md` (root, disposable OS,
   `CARGO_TARGET_DIR=/target`, read-only `.git`, commits on the host);
@@ -559,12 +578,130 @@ make claude
 make test-bins
 ```
 
+### Codex: bins/run-codex
+
+`run-codex` runs the `dev-codex` image: Codex (`@openai/codex`) plus the ACP
+adapter [`@agentclientprotocol/codex-acp`](https://github.com/agentclientprotocol/codex-acp),
+both pinned in `codex/Dockerfile` and bumped together (the adapter depends on
+one `@openai/codex` minor release; `CODEX_PATH` points the adapter at the
+image's own `codex`, so the TUI and ACP run one binary). It is `run-claude`'s
+twin: same project mount, caches, read-only `.git`, `/target` volume, SearXNG
+forwarding and multi-agent options.
+
+```sh
+cd /path/to/project
+run-codex                      # the codex TUI
+run-codex -- resume --last     # args after -- go to `codex`
+run-codex --acp                # ACP over stdio for agent-shell/acp.el
+run-codex --shell              # bash in the container
+run-codex --exec codex login --device-auth
+run-codex --acp --dry-run      # print the podman/docker command
+```
+
+`--acp` follows the same contract as `run-claude --acp` (exec, `-i` and never
+`-t`, protocol-only stdout, exits on stdin EOF, no `--shell`/`--exec`, args
+after `--` go to `codex-acp`).
+
+**agent-shell integration.** Start it from a buffer in the project root:
+
+```emacs-lisp
+(setq agent-shell-openai-codex-acp-command '("run-codex" "--acp"))
+;; Optional: (setq agent-shell-openai-default-session-mode-id "agent-full-access")
+```
+
+Then `M-x agent-shell-openai-start-codex`. Session list/resume works on the
+per-project rollouts; the mode selector offers `read-only`,
+`workspace-write`, `agent` and `agent-full-access`. agent-shell's
+`DEFAULT_AUTH_REQUEST` / empty `OPENAI_API_KEY` are set on the launcher's
+host process and do not reach the container, so log in (below) before the
+first ACP session.
+
+**Authentication.** Codex uses the ChatGPT login in the host's
+`~/.codex/auth.json`. Log in once inside the container
+(`run-codex --exec codex login --device-auth`; device-code login must be
+enabled in your ChatGPT security settings) or on the host with file storage
+(`codex login -c cli_auth_credentials_store='"file"'`); the container has no
+OS keyring, so the image forces file storage. ACP clients that support URL
+elicitation are also offered a device-code ChatGPT login; the browser login
+is hidden (`NO_BROWSER=1`) because its localhost callback cannot reach the
+container. `OPENAI_API_KEY` is deliberately **not** passed through; opt in
+for one run with `run-codex --env OPENAI_API_KEY` (then pick the API-key
+method in the client).
+
+#### Project-local state
+
+The host's `~/.codex` is mounted at `/root/.codex` (`CODEX_HOME`) as the
+shared home: `auth.json`, `config.toml`, global `AGENTS.md`, skills, rules
+and plugins. The per-session entries are over-mounted on top of it from the
+project:
+
+```text
+<project>/.codex-container/
+  sessions/            # rollouts (session/list, resume)
+  sqlite/              # CODEX_SQLITE_HOME: thread index, logs, memories, goals, queue DBs
+  archived_sessions/ memories/ shell_snapshots/ thread-writer-locks/ log/
+  history.jsonl        # prompt history
+```
+
+`CODEX_SQLITE_HOME=/root/.codex/sqlite` is set in the image, so Codex's
+SQLite state (including the thread index behind `session/list`) never
+lands in the shared home. Add `.codex-container/` to the project's
+`.gitignore` (this repository already does). The list is
+`PROJECT_STATE_DIRS` in `bins/run-codex`; a new per-session entry in a
+future Codex release lands in the shared home until it is added there.
+`codex-acp-entry` refuses to start when the launcher expects the
+over-mounts (`CODEX_PROJECT_HOME` is set) but `~/.codex/sessions` or the
+SQLite home is not a mount, so sessions of different projects never mix.
+
+#### Container policy and permissions
+
+- `/etc/codex/managed_config.toml` is rendered at container start by
+  `codex-dev-entry`. Codex layers it **over** `~/.codex/config.toml`, so
+  the policy never touches the shared home. It sets
+  `developer_instructions` to `APPEND_SYSTEM.md` (plus the multi-agent
+  "This run" section), trusts the working directory (project `.codex/`
+  layers load, no onboarding prompt), disables the update check (the image
+  is the pin) and forces file-based auth. Because it wins over the user
+  config, a `developer_instructions` key in `~/.codex/config.toml` is
+  ignored in the container: put personal instructions in
+  `~/.codex/AGENTS.md`, which still loads. Instructions an ACP client sends
+  as a system prompt are appended to it.
+- `/usr/local/bin/codex` is a wrapper ahead of the real binary. It turns
+  `CODEX_PERMISSION_MODE` into `-c sandbox_mode=… -c approval_policy=… -c
+  approvals_reviewer=…` for every invocation (TUI, `--shell`, and the
+  `app-server` the adapter spawns); the entry also exports it as the
+  adapter's `INITIAL_AGENT_MODE`. Sandbox and approval keys are kept out of
+  `managed_config.toml` on purpose: Codex turns them into requirements that
+  would lock the mode, while CLI overrides still let `/permissions` or the
+  ACP mode selector switch it inside a session.
+
+`run-codex` exports `CODEX_PERMISSION_MODE=agent-full-access`
+(`danger-full-access`, approvals `never`), the counterpart of Claude's
+`bypassPermissions`: the container is the isolation boundary. Codex's own
+Linux sandbox (bubblewrap) cannot create its namespaces inside the
+container, so in `read-only`, `workspace-write` and `agent` (auto-review)
+every sandboxed command fails; use them only for sessions that should not
+run commands at all. Override one run with
+`run-codex --env CODEX_PERMISSION_MODE=read-only`; an unknown value falls
+back to `read-only` with a warning. There is no Codex equivalent of Claude's
+git-write deny rules in a system location; the read-only `.git` mount is the
+enforcement. The launcher also exports `CODEX_DEV_CONTAINER=1` and, for git
+projects, `CODEX_GIT_READ_ONLY=1`.
+
+Rebuild the image after changing anything under `codex/` or
+`APPEND_SYSTEM.md`, and run the launcher tests:
+
+```sh
+make codex
+make test-bins
+```
+
 ### Deterministic checks: bins/run-check
 
 `run-check` runs one check command (tests, lint, `openspec validate`, …) in
 the `dev-shared` image, with no agent. A check runs code an agent just
 wrote, so it sees **no** harness state and **no** credentials: no
-`~/.claude`, `~/.dsh` or `~/.agents`, no provider API keys, no SearXNG. It
+`~/.claude-personal`, `~/.codex`, `~/.dsh` or `~/.agents`, no provider API keys, no SearXNG. It
 gets the project, the read-only `.git`, the build caches and a `/target`
 volume.
 
@@ -580,7 +717,7 @@ run-check --outbox .loop/chg-17 --timeout 600 -- ./ci.sh
   `--mount ro` or `--mount rw` to change that, and always with docker
   (no overlay mounts there). `AGENT_MOUNT_MODE` is always exported.
 - `/target` is `check-target<escaped pwd>` (or `check-target.<role>…` with
-  `--role`). `--target-from claude|dsh` mounts that harness's volume for the
+  `--role`). `--target-from claude|codex|dsh` mounts that harness's volume for the
   project instead, with the same `--role`/`--shared-target` rules, so a
   Rust check doesn't rebuild from scratch.
 - `--offline` runs with `--network none`.
@@ -594,7 +731,7 @@ run-check --outbox .loop/chg-17 --timeout 600 -- ./ci.sh
 ### Golden launcher tests
 
 `make test-bins` also runs `tests/test_golden_compat.py`, which compares
-each launcher's `--dry-run` command (`run-claude`, `run-dsh`, `run-pi`,
+each launcher's `--dry-run` command (`run-claude`, `run-codex`, `run-dsh`, `run-pi`,
 `run-pa`, across their modes and common flags) byte for byte with
 `tests/golden/<launcher>-<case>.txt`. Temp paths and the picked `run-dsh`
 web port are normalised, and stub `podman`/`docker` executables are put on
@@ -622,7 +759,7 @@ before**: same command, mounts, env, prompt text and on-disk layout
 
 ### Options
 
-`run-claude`, `run-dsh` and `run-check`:
+`run-claude`, `run-codex`, `run-dsh` and `run-check`:
 
 | Option | Values | Default | Effect |
 |---|---|---|---|
@@ -636,7 +773,7 @@ before**: same command, mounts, env, prompt text and on-disk layout
 | `--timeout SECONDS` | positive integer | none | `podman run --timeout` (podman only) |
 
 `run-check` only: `--offline` (`--network none`) and `--target-from
-claude|dsh` (see [Deterministic checks](#deterministic-checks-binsrun-check)).
+claude|codex|dsh` (see [Deterministic checks](#deterministic-checks-binsrun-check)).
 
 Env vars inside the container, set only when the matching option is given
 (`run-check` always sets `AGENT_MOUNT_MODE`):
@@ -656,6 +793,10 @@ run-claude --acp --role impl --label sem.instance=chg-17
 # reviewer: throwaway project view, one writable outbox, 30-minute cap
 run-dsh --acp --role review --mount overlay \
         --outbox .loop/chg-17 --label sem.instance=chg-17 --timeout 1800
+
+# second opinion from another model family, read-only
+run-codex --acp --role critic --mount ro \
+          --outbox .loop/chg-17 --label sem.instance=chg-17
 
 # check: no agent, no credentials, exit status is the verdict
 run-check --outbox .loop/chg-17 --role impl --target-from claude -- make test
@@ -677,21 +818,23 @@ nothing moves and existing sessions stay resumable:
 ```text
 <project>/.claude-container/            # legacy run-claude state (no --role)
 <project>/.claude-container/roles/NAME/ # run-claude --role NAME: projects/, sessions/, …, history.jsonl
+<project>/.codex-container/             # legacy run-codex state (no --role)
+<project>/.codex-container/roles/NAME/  # run-codex --role NAME: sessions/, sqlite/, …, history.jsonl
 <project>/.dsh/                         # legacy run-dsh state (no --role)
 <project>/.dsh/roles/NAME/              # run-dsh --role NAME: sessions/, storages/, …
 ```
 
-`CLAUDE_PROJECT_HOME` / `DSH_PROJECT_HOME` (and DSH's sessions/storages
-vars) point at the role dir; the DSH workspace stays the project.
+`CLAUDE_PROJECT_HOME` / `CODEX_PROJECT_HOME` / `DSH_PROJECT_HOME` (and
+DSH's sessions/storages vars) point at the role dir; the DSH workspace stays the project.
 
 `/target` volumes: `<prefix><escaped pwd>` without a role (unchanged),
 `<prefix>.<role><escaped pwd>` with one, e.g.
 `claude-target.review_home_me_proj`. Prefixes: `claude-target`,
-`dsh-target`, `check-target`. Role names contain neither `.` nor `_`, so no
+`codex-target`, `dsh-target`, `check-target`. Role names contain neither `.` nor `_`, so no
 project/role pair can produce another pair's name. `--shared-target` keeps
 the legacy volume when two roles should share build output on purpose.
 
-**One container per role and project.** `run-claude` and `run-dsh` take an
+**One container per role and project.** `run-claude`, `run-codex` and `run-dsh` take an
 exclusive `flock` on `<role dir>/.lock` and hold it for the life of the
 container (the lock fd survives the `exec` into podman). A second launch of
 the same role on the same project exits **2** with `role NAME is already
@@ -713,14 +856,15 @@ up. `--allow-duplicate-role` skips it. `run-check` takes no lock.
   there is no silent fallback to `rw`.
 - DSH keeps its project data inside the project, so under `ro`/`overlay`
   `run-dsh` bind-mounts `<project>/.dsh` (or the role dir) rw on top, and
-  sessions persist. Claude's state mounts target `/root/.claude`, outside
-  the project, and persist in every mode.
+  sessions persist. Claude's and Codex's state mounts target
+  `/root/.claude` / `/root/.codex`, outside the project, and persist in
+  every mode.
 - An overlay is **not a snapshot**: host changes to files the container
   hasn't touched show up inside. Start an `overlay` container only after
   `rw` writers on the same project have finished, and keep it to one step.
   The orchestrator has to enforce this; the launcher can't.
 - `-v` order: project, shared harness state / `~/.agents` / caches, Claude
-  state over-mounts, DSH state bind (`ro`/`overlay`), `.git`, outbox,
+  or Codex state over-mounts, DSH state bind (`ro`/`overlay`), `.git`, outbox,
   `/target`.
 
 ### Outbox
@@ -728,7 +872,7 @@ up. `--allow-duplicate-role` skips it. `run-check` takes no lock.
 `--outbox PATH` (relative to the project, or absolute) is resolved first,
 so a symlink that leads outside the project is rejected like any outside
 path. It must be strictly inside the project and not inside `.git`,
-`.claude-container` or `.dsh`; otherwise the launcher exits 2. It is
+`.claude-container`, `.codex-container` or `.dsh`; otherwise the launcher exits 2. It is
 created on the host before launch (also with `--dry-run`), mounted rw at the
 same absolute path in every mode, and its contents are never touched: the
 orchestrator owns them. Target projects should gitignore the outbox root
@@ -744,13 +888,16 @@ The prompt text changes only when the `AGENT_*` vars are set:
   project, and the outbox as the place for results. Without the vars the
   file is left as shipped, so an old launcher with a new image behaves as
   before.
+- **Codex:** `codex-dev-entry` renders the same base text and the same
+  "This run" section (a test keeps them identical to Claude's) into
+  `developer_instructions` in `/etc/codex/managed_config.toml`.
 - **DSH:** the `dev-container` plugin's environment context replaces the
   "files you edit are real host files and persist" paragraph for `ro` and
   `overlay`, drops the "Destructive edits" paragraph there, adds an outbox
   paragraph and a `Role for this run:` line. The default text is
   snapshot-tested (`tests/golden/dsh-environment-*.txt`).
 
-Rebuild the images (`make claude dsh`) after changing either.
+Rebuild the images (`make claude codex dsh`) after changing any of them.
 
 ### Time bounds and exit codes
 
@@ -767,11 +914,14 @@ before anything starts.
 - **Network:** agents always need model-API egress; per-role isolation would
   need an egress proxy with an allowlist. Only `run-check --offline` gets
   `--network none`.
-- **Shared Claude home:** parallel Claude containers share `~/.claude`.
+- **Shared Claude home:** parallel Claude containers share `~/.claude-personal`.
   Concurrent OAuth refreshes may race on `.credentials.json` (the first
   suspect for unexplained logouts), and every role on one project reads and
   rewrites the same `.claude.json` project entry (trust, onboarding,
   last-session bookkeeping). Transcripts are per role and unaffected.
+- **Shared Codex home:** likewise parallel Codex containers share
+  `~/.codex` (`auth.json` token refreshes, `config.toml`). Rollouts, the
+  thread index and memories are per role and unaffected.
 - **Docker:** no `overlay` and no `--timeout`; those combinations error out.
 - **`run-pi` / `run-pa`:** no roles or mount modes yet.
 - **Abbreviations:** the new options make some argparse abbreviations

@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# codex-dev-entry — image ENTRYPOINT of the dev-codex container.
+#
+# Renders /etc/codex/managed_config.toml (the image-local container policy),
+# then execs its arguments: `codex` (TUI), `codex-acp-entry` (ACP), `bash`
+# (--shell), or any --exec command.
+#
+# Codex layers managed_config.toml over ~/.codex/config.toml, so the host's
+# shared config never has to carry container policy. The rendered file holds:
+#   - developer_instructions: APPEND_SYSTEM.md (runtime facts: root,
+#     disposable OS, CARGO_TARGET_DIR=/target, read-only .git, commit on the
+#     host) and, for multi-agent runs, a "This run" section;
+#   - project trust for the working directory, so project .codex/ layers load
+#     without the onboarding prompt;
+#   - no update check (the image is the version pin) and file-based auth
+#     (~/.codex/auth.json; the container has no OS keyring).
+# Sandbox and approval settings are deliberately NOT written here: Codex
+# turns those managed keys into requirements that lock the mode. The codex
+# wrapper (/usr/local/bin/codex) passes them as CLI overrides instead.
+#
+# CODEX_PERMISSION_MODE picks the initial mode of every session, as codex-acp
+# mode ids; bins/run-codex exports agent-full-access (the container is the
+# isolation boundary) and `--env CODEX_PERMISSION_MODE=read-only` overrides
+# one run. It is validated here and exported to the wrapper (TUI) and, as
+# INITIAL_AGENT_MODE, to the adapter (ACP).
+#
+# Multi-agent runs (bins/run-codex --role/--mount/--outbox export AGENT_ROLE,
+# AGENT_MOUNT_MODE, AGENT_OUTBOX) get the same "This run" section as
+# claude-dev-entry, so the agent is told the truth about a read-only or
+# throwaway project mount and where results go.
+#
+# Never write to stdout: this script also fronts the ACP stdio server, where
+# every stdout byte must be an ACP JSON-RPC frame.
+
+set -euo pipefail
+
+# Overridable only so tests/test_codex_entry.py can run this outside the image.
+etc_dir="${CODEX_ENTRY_ETC_DIR:-/etc/codex}"
+share_dir="${CODEX_ENTRY_SHARE_DIR:-/usr/local/share/codex}"
+
+target="$etc_dir/managed_config.toml"
+
+mode="${CODEX_PERMISSION_MODE:-agent-full-access}"
+case "$mode" in
+    read-only|workspace-write|agent|agent-full-access) ;;
+    *)
+        echo "codex-dev-entry: warning: unknown CODEX_PERMISSION_MODE=$mode;" \
+             "using read-only" >&2
+        mode=read-only
+        ;;
+esac
+export CODEX_PERMISSION_MODE="$mode"
+export INITIAL_AGENT_MODE="$mode"
+
+# The "This run" section: one bullet per fact the base text gets wrong or
+# doesn't know. An explicit `--mount rw` adds nothing (the base is accurate).
+# Keep in sync with claude-dev-entry (tests/test_codex_entry.py compares them).
+run_section() {
+    local mode="${AGENT_MOUNT_MODE:-}" outbox="${AGENT_OUTBOX:-}" role="${AGENT_ROLE:-}"
+    local project="$PWD"
+    if [ -n "$role" ]; then
+        printf -- '- Role: `%s`.\n' "$role"
+    fi
+    case "$mode" in
+        ""|rw) ;;
+        ro)
+            printf -- '- Project mount: read-only. Every write under `%s` fails with' "$project"
+            printf -- ' "Read-only file system"; nothing you do there reaches the host.\n'
+            ;;
+        overlay)
+            printf -- '- Project mount: throwaway overlay. You may edit files, build and run'
+            printf -- ' tests, but every change under `%s` is discarded when the container' "$project"
+            printf -- ' stops and never reaches the host.\n'
+            ;;
+        *)
+            echo "codex-dev-entry: warning: unknown AGENT_MOUNT_MODE=$mode;" \
+                 "not describing it" >&2
+            ;;
+    esac
+    if [ -n "$outbox" ]; then
+        printf -- '- Outbox: `%s` is bind-mounted read-write from the host. Write every' "$outbox"
+        printf -- ' result the task asks for (reports, reviews, verdicts, patches) there.'
+        case "$mode" in
+            ro|overlay) printf -- ' It is the only location under the project whose changes persist.' ;;
+        esac
+        printf '\n'
+    fi
+}
+
+# developer_instructions text: the base plus the optional section.
+instructions=""
+base="$share_dir/APPEND_SYSTEM.md"
+if [ -f "$base" ]; then
+    instructions="$(cat "$base")"
+    section="$(run_section)"
+    if [ -n "$section" ]; then
+        instructions+=$'\n\n## This run (overrides the mount description above)\n\n'"$section"
+    fi
+else
+    echo "codex-dev-entry: warning: $base missing; continuing without the" \
+         "container instructions" >&2
+fi
+# A TOML multi-line literal string cannot contain its own delimiter.
+if [[ "$instructions" == *"'''"* ]]; then
+    echo "codex-dev-entry: warning: instructions contain ''' and cannot be" \
+         "written as TOML; continuing without them" >&2
+    instructions=""
+fi
+
+# TOML basic-string escaping for the project path (table key).
+project="${PWD//\\/\\\\}"
+project="${project//\"/\\\"}"
+
+{
+    printf '# Rendered by codex-dev-entry at container start; edits are lost.\n'
+    printf 'check_for_update_on_startup = false\n'
+    printf 'cli_auth_credentials_store = "file"\n'
+    if [ -n "$instructions" ]; then
+        printf "developer_instructions = '''\n%s\n'''\n" "$instructions"
+    fi
+    printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$project"
+} >"$target"
+
+exec "$@"

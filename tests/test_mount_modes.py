@@ -22,7 +22,8 @@ import unittest
 from pathlib import Path
 
 BINS = Path(__file__).resolve().parents[1] / "bins"
-LAUNCHERS = {"run-claude": "claude-acp-entry", "run-dsh": "dsh-acp-entry"}
+LAUNCHERS = {"run-claude": "claude-acp-entry", "run-codex": "codex-acp-entry",
+             "run-dsh": "dsh-acp-entry"}
 
 PASSTHROUGH_KEYS = (
     "ZAI_API_KEY",

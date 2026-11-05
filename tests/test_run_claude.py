@@ -3,7 +3,7 @@
 ACP mode must reuse TUI mode's container shape (mounts, working directory,
 environment, SearXNG loopback forwarding) while allocating no pseudo-TTY and
 handing stdio to claude-acp-entry. The per-project state entries must be
-over-mounted after the shared ~/.claude mount, and ANTHROPIC_API_KEY must not
+over-mounted after the shared ~/.claude-personal mount, and ANTHROPIC_API_KEY must not
 leak in unless asked for. These tests run only with --dry-run, so they need
 neither podman/docker nor the built image.
 
@@ -118,6 +118,14 @@ class RunClaudeDryRunTest(unittest.TestCase):
         self.assertTrue((state / "projects").is_dir())
         self.assertTrue((state / "history.jsonl").is_file())
         self.assertIn(f"{self.project / '.git'}:{self.project / '.git'}:ro,z", mounts)
+
+    def test_shared_home_is_not_host_claude_dir(self) -> None:
+        # ~/.claude belongs to Claude Desktop / the host CLI (another account).
+        mounts = self.option_values(self.tokens("--engine", "podman"), "-v")
+
+        self.assertIn(f"{self.home / '.claude-personal'}:/root/.claude:z", mounts)
+        self.assertFalse(any(spec.startswith(f"{self.home / '.claude'}:") for spec in mounts))
+        self.assertTrue((self.home / ".claude-personal").is_dir())
 
     def test_env_defaults(self) -> None:
         envs = self.option_values(self.tokens("--engine", "podman", "--acp"), "-e")

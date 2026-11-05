@@ -6,8 +6,9 @@
 #   make prime-agent   # shared + prime-agent harness
 #   make dsh           # shared + DeepSeek Harness (dsh web + acp profiles)
 #   make claude        # shared + Claude Code (TUI + claude-agent-acp)
+#   make codex         # shared + Codex (TUI + codex-acp)
 #   make test-dsh      # dev-container plugin unit tests (Node 22+)
-#   make test-bins     # run-dsh/run-claude dry-run contract tests (Python 3.10+)
+#   make test-bins     # run-* launcher and entry-script tests (Python 3.11+)
 #   make test-run-dsh  # alias of test-bins
 #   make all           # all harnesses
 #
@@ -17,7 +18,8 @@
 #
 # All builds use the repo root as context (the shared layer COPYs
 # .m2/settings.xml, the dsh layer COPYs dsh/dsh-web-entry and
-# dsh/dsh-acp-entry, the claude layer COPYs APPEND_SYSTEM.md and claude/*),
+# dsh/dsh-acp-entry, the claude and codex layers COPY APPEND_SYSTEM.md and
+# claude/* or codex/*),
 # so run make from the repo root.
 
 ENGINE       ?= podman
@@ -26,11 +28,12 @@ TAG_PI       ?= dev-pi
 TAG_PRIME    ?= dev-prime-agent
 TAG_DSH      ?= dev-dsh
 TAG_CLAUDE   ?= dev-claude
+TAG_CODEX    ?= dev-codex
 CONTEXT      := .
 
-.PHONY: all shared pi prime-agent dsh claude test-dsh test-bins test-run-dsh
+.PHONY: all shared pi prime-agent dsh claude codex test-dsh test-bins test-run-dsh
 
-all: pi prime-agent dsh claude
+all: pi prime-agent dsh claude codex
 
 shared:
 	$(ENGINE) build -f shared/Dockerfile -t $(TAG_SHARED) $(CONTEXT)
@@ -49,6 +52,10 @@ dsh: shared
 
 claude: shared
 	$(ENGINE) build -f claude/Dockerfile -t $(TAG_CLAUDE) \
+		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)
+
+codex: shared
+	$(ENGINE) build -f codex/Dockerfile -t $(TAG_CODEX) \
 		--build-arg BASE_IMAGE=$(TAG_SHARED) $(CONTEXT)
 
 test-dsh:

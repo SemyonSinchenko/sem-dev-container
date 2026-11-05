@@ -11,3 +11,6 @@ __pycache__/
 
 # Claude Code project-local state (run-claude)
 .claude-container/
+
+# Codex project-local state (run-codex)
+.codex-container/

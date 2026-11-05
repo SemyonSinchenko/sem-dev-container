@@ -247,7 +247,7 @@ def mount_envs(args: argparse.Namespace) -> list[str]:
 
 # Project subdirs an outbox must never be inside: git state (mounted
 # read-only) and the launchers' own per-project session state.
-OUTBOX_FORBIDDEN = (".git", ".claude-container", ".dsh")
+OUTBOX_FORBIDDEN = (".git", ".claude-container", ".codex-container", ".dsh")
 
 
 def add_outbox_args(parser: argparse.ArgumentParser) -> None:

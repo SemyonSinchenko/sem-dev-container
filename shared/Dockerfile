@@ -33,6 +33,9 @@ RUN --mount=type=cache,target=/var/cache/apt \
         wget \
         git \
         openssh-client \
+        # rsync: pushing code/results to remote (e.g. AWS benchmark) hosts
+        # over ssh; agents otherwise apt-install it on every such run.
+        rsync \
         tzdata \
         gnupg \
         unzip \

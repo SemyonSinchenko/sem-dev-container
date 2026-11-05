@@ -102,7 +102,7 @@ class RunCheckTest(unittest.TestCase):
     def test_no_harness_state_keys_or_searxng(self) -> None:
         tokens = self.tokens("--role", "impl", "--", "env")
         joined = " ".join(tokens)
-        for forbidden in (".claude", ".dsh", ".agents", "SEARXNG", "pasta",
+        for forbidden in (".claude", ".codex", ".dsh", ".agents", "SEARXNG", "pasta",
                           "sk-host-secret", *PASSTHROUGH_KEYS):
             self.assertNotIn(forbidden, joined)
 
@@ -183,12 +183,13 @@ class RunCheckTest(unittest.TestCase):
         ])
         # No role dir and no lock: parallel checks for one role are fine.
         self.assertFalse((self.project / ".claude-container").exists())
+        self.assertFalse((self.project / ".codex-container").exists())
         self.assertFalse((self.project / ".dsh").exists())
         self.assertEqual(self.tokens("--shared-target", "--role", "impl", "--", "true")
                          [-2:], ["dev-shared", "true"])
 
     def test_target_from_matches_agent_volumes(self) -> None:
-        for harness in ("claude", "dsh"):
+        for harness in ("claude", "codex", "dsh"):
             for role_args in ([], ["--role", "impl"], ["--role", "impl", "--shared-target"]):
                 with self.subTest(harness=harness, role=role_args):
                     agent = self.tokens(*role_args, launcher=BINS / f"run-{harness}")

@@ -43,6 +43,13 @@ LAUNCHERS = {
         "state_env": "CLAUDE_PROJECT_HOME",
         "acp_entry": "claude-acp-entry",
     },
+    "run-codex": {
+        "harness": "codex",
+        "state": ".codex-container",
+        "volume": "codex-target",
+        "state_env": "CODEX_PROJECT_HOME",
+        "acp_entry": "codex-acp-entry",
+    },
     "run-dsh": {
         "harness": "dsh",
         "state": ".dsh",
@@ -132,6 +139,17 @@ class RoleTest(unittest.TestCase):
         self.assertFalse(any(m.startswith(f"{legacy}/projects:") for m in mounts))
         self.assertTrue((role_dir / "history.jsonl").is_file())
         self.assertTrue((role_dir / "projects").is_dir())
+
+    def test_codex_role_overmounts_point_at_role_dir(self) -> None:
+        tokens = self.tokens("run-codex", "--role", "impl")
+        role_dir = self.role_dir("run-codex", "impl")
+        mounts = self.values(tokens, "-v")
+        for name in ("sessions", "sqlite", "history.jsonl"):
+            self.assertIn(f"{role_dir}/{name}:/root/.codex/{name}:z", mounts)
+        legacy = self.project / ".codex-container"
+        self.assertFalse(any(m.startswith(f"{legacy}/sessions:") for m in mounts))
+        self.assertTrue((role_dir / "history.jsonl").is_file())
+        self.assertTrue((role_dir / "sqlite").is_dir())
 
     def test_dsh_role_sessions_and_workspace(self) -> None:
         envs = self.values(self.tokens("run-dsh", "--role", "impl"), "-e")
